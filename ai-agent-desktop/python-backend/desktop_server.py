@@ -5,6 +5,109 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any
 import asyncio
 from datetime import datetime
+import os
+import base64
+import email as email_lib
+
+from dotenv import load_dotenv
+load_dotenv()
+
+# Gmail API setup
+_gmail_service = None
+
+def _get_gmail_service():
+    global _gmail_service
+    if _gmail_service is not None:
+        return _gmail_service
+
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
+
+    if not all([client_id, client_secret, refresh_token]):
+        return None
+
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+        )
+        _gmail_service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        return _gmail_service
+    except Exception as e:
+        print(f"Gmail init error: {e}")
+        return None
+
+
+def _header(headers, name):
+    for h in headers:
+        if h["name"].lower() == name.lower():
+            return h["value"]
+    return ""
+
+
+def _fetch_gmail_emails(max_results=20):
+    service = _get_gmail_service()
+    if service is None:
+        return None  # signal to use stub data
+
+    results = service.users().messages().list(
+        userId="me", labelIds=["INBOX"], maxResults=max_results
+    ).execute()
+
+    messages = results.get("messages", [])
+    emails = []
+
+    for msg in messages:
+        full = service.users().messages().get(
+            userId="me", id=msg["id"], format="metadata",
+            metadataHeaders=["From", "Subject", "Date"]
+        ).execute()
+
+        headers = full.get("payload", {}).get("headers", [])
+        sender = _header(headers, "From")
+        subject = _header(headers, "Subject") or "(no subject)"
+        date_str = _header(headers, "Date")
+        snippet = full.get("snippet", "")
+        label_ids = full.get("labelIds", [])
+
+        # Rough priority: IMPORTANT label = urgent
+        priority = "urgent" if "IMPORTANT" in label_ids else "normal"
+
+        # Human-readable time
+        try:
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(date_str)
+            now = datetime.now(dt.tzinfo)
+            delta = now - dt
+            hours = int(delta.total_seconds() // 3600)
+            if hours < 1:
+                time_label = "Just now"
+            elif hours < 24:
+                time_label = f"{hours}h ago"
+            else:
+                time_label = f"{delta.days}d ago"
+        except Exception:
+            time_label = date_str
+
+        emails.append({
+            "id": msg["id"],
+            "from": sender,
+            "subject": subject,
+            "snippet": snippet,
+            "time": time_label,
+            "priority": priority,
+            "body": snippet,
+        })
+
+    return emails
 
 app = FastAPI(title="AI Agent Desktop Backend")
 
@@ -45,14 +148,30 @@ async def handle_command(command: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": True, "result": {"status": "ok"}}
     
     elif command == "get_summary":
+        email_summary = {"urgent": 3, "unread": 12}
+        service = _get_gmail_service()
+        if service:
+            try:
+                unread = service.users().messages().list(
+                    userId="me", labelIds=["INBOX", "UNREAD"], maxResults=1
+                ).execute()
+                unread_count = unread.get("resultSizeEstimate", 0)
+                important_unread = service.users().messages().list(
+                    userId="me", labelIds=["INBOX", "UNREAD", "IMPORTANT"], maxResults=1
+                ).execute()
+                urgent_count = important_unread.get("resultSizeEstimate", 0)
+                email_summary = {"urgent": urgent_count, "unread": unread_count}
+            except Exception as e:
+                print(f"Gmail summary error: {e}")
+
         return {
             "success": True,
             "result": {
-                "email": {"urgent": 3, "unread": 12},
+                "email": email_summary,
                 "calendar": {"meetings": 4, "next_meeting": {"title": "Team Standup", "time": "10:00 AM"}},
                 "tasks": {"high": 5, "total": 15},
                 "recent_activity": [
-                    {"type": "email", "message": "New email from boss@company.com", "timestamp": datetime.now().isoformat()}
+                    {"type": "email", "message": "Inbox fetched from Gmail", "timestamp": datetime.now().isoformat()}
                 ]
             }
         }
@@ -80,13 +199,19 @@ async def handle_command(command: str, args: Dict[str, Any]) -> Dict[str, Any]:
         }
     
     elif command == "get_emails":
+        max_results = args.get("max_results", 20)
+        real_emails = _fetch_gmail_emails(max_results=max_results)
+        if real_emails is not None:
+            return {"success": True, "result": {"emails": real_emails, "source": "gmail"}}
+        # Fallback stub
         return {
             "success": True,
             "result": {
                 "emails": [
                     {"id": "1", "from": "boss@company.com", "subject": "Q1 Budget Review", "snippet": "Please review...", "time": "2 hours ago", "priority": "urgent", "body": "Please review the attached Q1 budget analysis."},
                     {"id": "2", "from": "team@company.com", "subject": "Sprint Planning", "snippet": "Sprint planning...", "time": "4 hours ago", "priority": "normal", "body": "Sprint planning meeting tomorrow at 2 PM."}
-                ]
+                ],
+                "source": "stub"
             }
         }
     

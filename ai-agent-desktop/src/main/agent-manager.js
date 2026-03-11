@@ -16,7 +16,17 @@ class AgentManager {
 
   async start() {
     console.log('Starting Python backend...');
-    
+
+    // If backend is already running (e.g. manually started), skip spawning
+    try {
+      const response = await axios.get(`${this.backendUrl}/health`, { timeout: 2000 });
+      if (response.data?.status === 'healthy') {
+        this.isReady = true;
+        console.log('✓ Python backend already running, skipping spawn');
+        return;
+      }
+    } catch (_) {}
+
     // Determine Python executable
     const pythonExecutable = this.findPythonExecutable();
     if (!pythonExecutable) {

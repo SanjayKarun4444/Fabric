@@ -8,7 +8,11 @@
       "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && npm install -D @tailwindcss/postcss 2>&1 | tail -5)",
       "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && npx vite build 2>&1 | tail -20)",
       "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && npx vite build 2>&1)",
-      "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && npm run dev 2>&1)"
+      "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && npm run dev 2>&1)",
+      "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && start cmd /c \"npm run dev\")",
+      "Bash(sleep 15 && curl -s http://localhost:5173 > /dev/null && echo \"vite_up\" || echo \"vite_not_up\")",
+      "Bash(cd \"C:\\\\Users\\\\sanja\\\\OneDrive\\\\Documents\\\\GitHub\\\\Fabric\\\\fabric\\\\ai-agent-desktop\\\\python-backend\" && venv/Scripts/pip install google-auth google-auth-oauthlib google-api-python-client 2>&1 | tail -5)",
+      "Bash(cd \"C:\\\\Users\\\\sanja\\\\OneDrive\\\\Documents\\\\GitHub\\\\Fabric\\\\fabric\\\\ai-agent-desktop\\\\python-backend\" && venv/Scripts/python -c \"import desktop_server; print\\('OK'\\)\")"
     ]
   }
 }

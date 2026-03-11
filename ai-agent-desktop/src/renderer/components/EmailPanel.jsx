@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Mail, RefreshCw, Inbox, Star, Reply, Archive,
@@ -7,17 +7,33 @@ import {
 
 const FILTERS = ['All', 'Urgent', 'Unread', 'Starred'];
 
-const MOCK_EMAILS = [
-  { id: '1', from: 'Sarah Chen', email: 'sarah.chen@company.com', subject: 'Q1 Budget Review — Action Required', snippet: 'Please review the attached Q1 budget analysis and provide your feedback by end of day...', time: '12m ago', priority: 'urgent', unread: true, starred: false, body: 'Hi,\n\nPlease review the attached Q1 budget analysis and provide your feedback by end of day. This is critical for the board meeting tomorrow.\n\nKey areas:\n• Revenue projections for Q2\n• Cost reduction initiatives\n• Headcount planning\n\nBest,\nSarah' },
-  { id: '2', from: 'David Park', email: 'david@acmecorp.com', subject: 'Contract deadline — response needed', snippet: 'Following up on the contract I sent last week. We need a response by tomorrow EOD...', time: '1h ago', priority: 'urgent', unread: true, starred: true, body: 'Hi,\n\nFollowing up on the contract from last week. We need your response by tomorrow EOD to proceed.\n\nBest,\nDavid' },
-  { id: '3', from: 'Marketing Team', email: 'marketing@company.com', subject: 'Campaign approval needed by EOD', snippet: 'The Q1 marketing campaign is ready for your approval. Creative assets attached...', time: '2h ago', priority: 'normal', unread: true, starred: false, body: 'Hi,\n\nThe Q1 campaign is ready for your approval. Please sign off by Friday.\n\nThanks!' },
-  { id: '4', from: 'Alex Rivera', email: 'alex.r@company.com', subject: 'Sprint review notes & action items', snippet: "Here are the notes from today's sprint review. We shipped 14 of 16 planned stories...", time: '3h ago', priority: 'normal', unread: false, starred: false, body: "Team,\n\nSprint notes:\n- 14 of 16 stories shipped\n- Velocity up 12%\n- 2 items moved to next sprint\n\nSee you at planning!" },
-  { id: '5', from: 'Board Office', email: 'board@company.com', subject: 'Board meeting prep materials', snippet: "Please find attached the agenda and materials for next week's board meeting...", time: '5h ago', priority: 'normal', unread: false, starred: true, body: 'Please find attached the agenda and materials for next week\'s board meeting. All executives should review before the meeting.' },
-];
+// Parse "Name <email@example.com>" or plain "email@example.com"
+function parseFrom(raw) {
+  const match = raw.match(/^(.+?)\s*<([^>]+)>$/);
+  if (match) return { name: match[1].trim().replace(/^"|"$/g, ''), email: match[2].trim() };
+  return { name: raw.trim(), email: raw.trim() };
+}
+
+function normalizeEmail(e) {
+  const { name, email } = parseFrom(e.from || '');
+  return {
+    id: e.id,
+    from: name || email,
+    email: email,
+    subject: e.subject || '(no subject)',
+    snippet: e.snippet || '',
+    time: e.time || '',
+    priority: e.priority || 'normal',
+    unread: true,
+    starred: false,
+    body: e.body || e.snippet || '',
+  };
+}
 
 export default function EmailPanel({ onCommand }) {
-  const [emails, setEmails] = useState(MOCK_EMAILS);
+  const [emails, setEmails] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [fetchError, setFetchError] = useState(null);
   const [filter, setFilter] = useState('All');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState(null);
@@ -31,6 +47,24 @@ export default function EmailPanel({ onCommand }) {
     if (filter === 'Starred') return e.starred;
     return true;
   });
+
+  const fetchEmails = async () => {
+    setLoading(true);
+    setFetchError(null);
+    try {
+      const result = await onCommand('get_emails', { max_results: 30 });
+      if (result?.success && result.result?.emails) {
+        setEmails(result.result.emails.map(normalizeEmail));
+      } else {
+        setFetchError('Could not load emails.');
+      }
+    } catch (err) {
+      setFetchError('Backend unreachable.');
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { fetchEmails(); }, []);
 
   const handleTriage = async () => {
     setTriaging(true);
@@ -75,8 +109,8 @@ export default function EmailPanel({ onCommand }) {
                   : <Inbox size={12} />}
                 {triaging ? 'Triaging…' : 'AI Triage'}
               </button>
-              <button className="btn btn-secondary btn-sm btn-icon" onClick={() => setLoading(l => !l)}>
-                <RefreshCw size={12} />
+              <button className="btn btn-secondary btn-sm btn-icon" onClick={fetchEmails} disabled={loading}>
+                <RefreshCw size={12} style={loading ? { animation: 'spin 0.8s linear infinite' } : {}} />
               </button>
             </div>
           </div>
@@ -119,6 +153,10 @@ export default function EmailPanel({ onCommand }) {
           {loading ? (
             <div style={{ padding: '8px 0', display: 'flex', flexDirection: 'column', gap: 8 }}>
               {[...Array(5)].map((_, i) => <div key={i} className="skeleton" style={{ height: 70, borderRadius: 10 }} />)}
+            </div>
+          ) : fetchError ? (
+            <div style={{ padding: '40px 16px', textAlign: 'center', color: 'var(--red)', fontSize: 13 }}>
+              {fetchError}
             </div>
           ) : filtered.length === 0 ? (
             <div style={{ padding: '40px 16px', textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>

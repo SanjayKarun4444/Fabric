@@ -47,6 +47,9 @@ out/
 mcp-servers/**/dist/
 mcp-servers/**/node_modules/
 
+# Google OAuth client secret (local only)
+ai-agent-desktop/python-backend/client_secret_*.json
+
 # Testing
 coverage/
 .nyc_output/
