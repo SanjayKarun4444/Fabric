@@ -17,20 +17,26 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
+    "axios": "^1.6.5",
     "electron-store": "^8.1.0",
+    "framer-motion": "^12.35.2",
+    "lucide-react": "^0.577.0",
     "node-notifier": "^10.0.1",
     "node-schedule": "^2.1.1",
-    "axios": "^1.6.5",
     "ws": "^8.16.0"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.1",
     "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.27",
     "concurrently": "^8.2.2",
     "cross-env": "^7.0.3",
     "electron": "^28.1.0",
     "electron-builder": "^24.9.1",
+    "postcss": "^8.5.8",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "tailwindcss": "^4.2.1",
     "vite": "^5.0.11",
     "wait-on": "^7.2.0"
   },
@@ -54,7 +60,11 @@
       {
         "from": "python-backend",
         "to": "python-backend",
-        "filter": ["**/*", "!**/__pycache__", "!**/*.pyc"]
+        "filter": [
+          "**/*",
+          "!**/__pycache__",
+          "!**/*.pyc"
+        ]
       }
     ],
     "mac": {
@@ -63,11 +73,17 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         },
         {
           "target": "zip",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "hardenedRuntime": true,
@@ -80,11 +96,16 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64", "ia32"]
+          "arch": [
+            "x64",
+            "ia32"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -93,11 +114,15 @@
       "target": [
         {
           "target": "AppImage",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "deb",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "category": "Office"

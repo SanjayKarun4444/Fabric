@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && npm install framer-motion lucide-react 2>&1 | tail -5)",
+      "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && npm install -D tailwindcss postcss autoprefixer 2>&1 | tail -5)",
+      "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && npx vite build 2>&1 | tail -30)",
+      "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && node -e \"console.log\\(require\\('./node_modules/tailwindcss/package.json'\\).version\\)\")",
+      "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && npm install -D @tailwindcss/postcss 2>&1 | tail -5)",
+      "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && npx vite build 2>&1 | tail -20)",
+      "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && npx vite build 2>&1)",
+      "Bash(cd \"C:/Users/sanja/OneDrive/Documents/GitHub/Fabric/fabric/ai-agent-desktop\" && npm run dev 2>&1)"
+    ]
+  }
+}

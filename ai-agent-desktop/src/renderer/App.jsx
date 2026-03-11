@@ -1,15 +1,25 @@
 import React, { useState, useEffect } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import EmailPanel from './components/EmailPanel';
 import CalendarPanel from './components/CalendarPanel';
 import TaskPanel from './components/TaskPanel';
 import ChatInterface from './components/ChatInterface';
+import AgentMonitor from './components/AgentMonitor';
+import ResearchPanel from './components/ResearchPanel';
 import SettingsPanel from './components/SettingsPanel';
 import Notification from './components/Notification';
 import LoadingScreen from './components/LoadingScreen';
 import { useAgentStatus } from './hooks/useAgentStatus';
+import './styles/index.css';
 import './styles/App.css';
+
+const pageVariants = {
+  initial: { opacity: 0, y: 8 },
+  animate: { opacity: 1, y: 0, transition: { duration: 0.22, ease: [0.22, 1, 0.36, 1] } },
+  exit:    { opacity: 0, y: -4, transition: { duration: 0.15, ease: 'easeIn' } },
+};
 
 function App() {
   const [currentView, setCurrentView] = useState('dashboard');
@@ -18,139 +28,101 @@ function App() {
   const agentStatus = useAgentStatus();
 
   useEffect(() => {
-    // Listen for navigation events from main process
-    const unsubNav = window.electronAPI.onNavigate((page) => {
-      setCurrentView(page);
-    });
-
-    // Listen for agent updates
-    const unsubUpdate = window.electronAPI.onAgentUpdate((data) => {
-      handleAgentUpdate(data);
-    });
-
-    // Initial load
+    const unsubNav = window.electronAPI?.onNavigate?.((page) => setCurrentView(page));
+    const unsubUpdate = window.electronAPI?.onAgentUpdate?.((data) => handleAgentUpdate(data));
     loadInitialData();
-
     return () => {
-      unsubNav();
-      unsubUpdate();
+      unsubNav?.();
+      unsubUpdate?.();
     };
   }, []);
 
   const loadInitialData = async () => {
     try {
-      // Check agent status
-      const status = await window.electronAPI.getAgentStatus();
-      if (status.success) {
-        console.log('Agent connected:', status.status);
-      }
-      
-      setIsLoading(false);
-    } catch (error) {
-      console.error('Failed to load initial data:', error);
-      addNotification('Failed to connect to agent', 'error');
-      setIsLoading(false);
+      const status = await window.electronAPI?.getAgentStatus?.();
+      if (status?.success) console.log('Agent connected:', status.status);
+    } catch (err) {
+      addNotification('Failed to connect to agent backend', 'error');
+    } finally {
+      setTimeout(() => setIsLoading(false), 800);
     }
   };
 
   const handleAgentUpdate = (data) => {
-    console.log('Agent update:', data);
-    
-    // Show notification based on update type
-    if (data.type === 'new_emails' && data.data.urgent > 0) {
-      addNotification(
-        `${data.data.urgent} urgent email${data.data.urgent > 1 ? 's' : ''}`,
-        'info'
-      );
+    if (data.type === 'new_emails' && data.data?.urgent > 0) {
+      addNotification(`${data.data.urgent} urgent email${data.data.urgent > 1 ? 's' : ''} need attention`, 'warning');
     } else if (data.type === 'morning_routine') {
-      addNotification('Morning routine complete!', 'success');
+      addNotification('Morning routine complete — good morning!', 'success');
     } else if (data.type === 'evening_routine') {
-      addNotification('Evening routine complete!', 'success');
+      addNotification('Evening routine complete — great day!', 'success');
     }
   };
 
   const handleCommand = async (command, args) => {
     try {
-      addNotification(`Executing: ${command}...`, 'info');
-      
-      const result = await window.electronAPI.sendCommand(command, args);
-      
-      if (result.success) {
-        addNotification(`${command} completed successfully`, 'success');
-        return result;
-      } else {
-        addNotification(`Error: ${result.error}`, 'error');
-        return result;
-      }
-    } catch (error) {
-      addNotification(`Error: ${error.message}`, 'error');
-      return { success: false, error: error.message };
+      const result = await window.electronAPI?.sendCommand?.(command, args);
+      if (result?.success) return result;
+      addNotification(result?.error || 'Command failed', 'error');
+      return result;
+    } catch (err) {
+      addNotification(err.message, 'error');
+      return { success: false, error: err.message };
     }
   };
 
   const addNotification = (message, type = 'info') => {
-    const notification = {
-      id: Date.now(),
-      message,
-      type,
-      timestamp: new Date(),
-    };
-    
-    setNotifications(prev => [notification, ...prev].slice(0, 5));
-    
-    // Auto-remove after 5 seconds
-    setTimeout(() => {
-      removeNotification(notification.id);
-    }, 5000);
+    const id = Date.now() + Math.random();
+    setNotifications(prev => [{ id, message, type, timestamp: new Date() }, ...prev].slice(0, 5));
+    setTimeout(() => removeNotification(id), 5000);
   };
 
-  const removeNotification = (id) => {
+  const removeNotification = (id) =>
     setNotifications(prev => prev.filter(n => n.id !== id));
-  };
 
-  if (isLoading) {
-    return <LoadingScreen />;
-  }
+  if (isLoading) return <LoadingScreen />;
+
+  const views = {
+    dashboard: <Dashboard onCommand={handleCommand} />,
+    email:     <EmailPanel onCommand={handleCommand} />,
+    calendar:  <CalendarPanel onCommand={handleCommand} />,
+    tasks:     <TaskPanel onCommand={handleCommand} />,
+    chat:      <ChatInterface onCommand={handleCommand} />,
+    agents:    <AgentMonitor agentStatus={agentStatus} onCommand={handleCommand} />,
+    research:  <ResearchPanel onCommand={handleCommand} />,
+    settings:  <SettingsPanel />,
+  };
 
   return (
-    <div className="app">
-      <Sidebar 
+    <div className="app-shell">
+      <Sidebar
         currentView={currentView}
         onNavigate={setCurrentView}
         agentStatus={agentStatus}
       />
 
-      <main className="main-content">
-        {/* Notifications */}
-        <div className="notifications-container">
-          {notifications.map(notif => (
-            <Notification
-              key={notif.id}
-              {...notif}
-              onClose={() => removeNotification(notif.id)}
-            />
-          ))}
+      <main className="main-area">
+        <div className="notifications-stack">
+          <AnimatePresence>
+            {notifications.map(n => (
+              <Notification key={n.id} {...n} onClose={() => removeNotification(n.id)} />
+            ))}
+          </AnimatePresence>
         </div>
 
-        {/* Views */}
-        {currentView === 'dashboard' && (
-          <Dashboard onCommand={handleCommand} />
-        )}
-        {currentView === 'email' && (
-          <EmailPanel onCommand={handleCommand} />
-        )}
-        {currentView === 'calendar' && (
-          <CalendarPanel onCommand={handleCommand} />
-        )}
-        {currentView === 'tasks' && (
-          <TaskPanel onCommand={handleCommand} />
-        )}
-        {currentView === 'chat' && (
-          <ChatInterface onCommand={handleCommand} />
-        )}
-        {currentView === 'settings' && (
-          <SettingsPanel />
-        )}
+        <div className="page-content">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={currentView}
+              variants={pageVariants}
+              initial="initial"
+              animate="animate"
+              exit="exit"
+              style={{ height: '100%' }}
+            >
+              {views[currentView] ?? views.dashboard}
+            </motion.div>
+          </AnimatePresence>
+        </div>
       </main>
     </div>
   );

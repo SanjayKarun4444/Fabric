@@ -58,7 +58,7 @@ function initializeIpcHandlers(mainWindow, store) {
         return { success: false, error: 'Agent not initialized' };
       }
 
-      const status = agentManager.getStatus();
+      const status = await agentManager.getStatus();
       return { success: true, status };
     } catch (error) {
       return { success: false, error: error.message };
