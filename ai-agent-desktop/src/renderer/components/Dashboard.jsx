@@ -23,6 +23,7 @@ function getGreeting() {
 
 function Dashboard({ onCommand }) {
   const [summary, setSummary] = useState(null);
+  const [urgentEmails, setUrgentEmails] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const { text: greeting, icon: GreetIcon } = getGreeting();
@@ -32,8 +33,26 @@ function Dashboard({ onCommand }) {
   const loadSummary = async () => {
     setLoading(true);
     try {
-      const result = await window.electronAPI?.sendCommand?.('get_summary');
-      if (result?.success) setSummary(result.result);
+      const [summaryResult, emailResult] = await Promise.all([
+        window.electronAPI?.sendCommand?.('get_summary'),
+        window.electronAPI?.sendCommand?.('get_emails', { max_results: 10 }),
+      ]);
+      if (summaryResult?.success) setSummary(summaryResult.result);
+      if (emailResult?.success && emailResult.result?.emails) {
+        const emails = emailResult.result.emails;
+        // Show urgent first, then fill with most recent up to 4
+        const urgent = emails.filter(e => e.priority === 'urgent');
+        const normal = emails.filter(e => e.priority !== 'urgent');
+        setUrgentEmails([...urgent, ...normal].slice(0, 4).map(e => {
+          const match = (e.from || '').match(/^(.+?)\s*<([^>]+)>$/);
+          return {
+            from: match ? match[1].trim().replace(/^"|"$/g, '') : (e.from || 'Unknown'),
+            subject: e.subject || '(no subject)',
+            time: e.time || '',
+            urgent: e.priority === 'urgent',
+          };
+        }));
+      }
     } catch (_) {}
     setLoading(false);
   };
@@ -197,12 +216,10 @@ function Dashboard({ onCommand }) {
                 </button>
               </div>
               <div style={{ marginTop: 14, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                {[
-                  { from: 'Sarah Chen',    subject: 'Q1 Budget Review — Action Required',  time: '12m ago', urgent: true },
-                  { from: 'David Park',    subject: 'Contract deadline tomorrow',            time: '1h ago',  urgent: true },
-                  { from: 'Marketing',     subject: 'Campaign approval needed by EOD',       time: '2h ago',  urgent: false },
-                  { from: 'Board Office',  subject: 'Meeting prep materials required',       time: '3h ago',  urgent: false },
-                ].map((email, i) => <EmailRow key={i} email={email} />)}
+                {urgentEmails.length > 0
+                  ? urgentEmails.map((email, i) => <EmailRow key={i} email={email} />)
+                  : <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: '20px 0', color: 'var(--text-3)', fontSize: 13 }}>No emails loaded</div>
+                }
               </div>
             </motion.div>
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CheckSquare, Plus, Trash2, Flag, Calendar, Search, SortAsc, MoreHorizontal } from 'lucide-react';
 
@@ -21,8 +21,20 @@ const MOCK_TASKS = [
 
 const VIEWS = ['All', 'Active', 'Completed'];
 
+const STORAGE_KEY = 'fabric_tasks';
+
 export default function TaskPanel({ onCommand }) {
-  const [tasks, setTasks] = useState(MOCK_TASKS);
+  const [tasks, setTasks] = useState(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) return JSON.parse(stored);
+    } catch (_) {}
+    return MOCK_TASKS;
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks)); } catch (_) {}
+  }, [tasks]);
   const [view, setView] = useState('Active');
   const [search, setSearch] = useState('');
   const [newTitle, setNewTitle] = useState('');

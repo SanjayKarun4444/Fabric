@@ -2,7 +2,10 @@
 import os
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/calendar",
+]
 
 # Locate the client_secrets file (it may be in repo root)
 # DEFAULT_CREDENTIALS_NAME = "client_secret_800333772675-8vj53o4losf2pbaf0fq869jumnslg5kp.apps.googleusercontent.com.json"

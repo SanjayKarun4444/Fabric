@@ -4,7 +4,7 @@ import uvicorn
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import os
 import base64
 import email as email_lib
@@ -14,6 +14,10 @@ load_dotenv()
 
 # Gmail API setup
 _gmail_service = None
+_calendar_service = None
+
+_EVENT_COLORS = ['#6366f1', '#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#ec4899', '#14b8a6']
+_VIRTUAL_KEYWORDS = {'zoom', 'meet', 'teams', 'webex', 'skype', 'slack', 'whereby', 'bluejeans'}
 
 def _get_gmail_service():
     global _gmail_service
@@ -44,6 +48,133 @@ def _get_gmail_service():
     except Exception as e:
         print(f"Gmail init error: {e}")
         return None
+
+
+def _get_calendar_service():
+    global _calendar_service
+    if _calendar_service is not None:
+        return _calendar_service
+
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
+
+    if not all([client_id, client_secret, refresh_token]):
+        return None
+
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=["https://www.googleapis.com/auth/calendar"],
+        )
+        _calendar_service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        return _calendar_service
+    except Exception as e:
+        print(f"Calendar init error: {e}")
+        return None
+
+
+def _fetch_calendar_events(target_date=None):
+    service = _get_calendar_service()
+    if service is None:
+        return None
+
+    if target_date is None:
+        target_date = datetime.now().date()
+
+    # Build RFC3339 time bounds for the target day
+    local_tz = datetime.now().astimezone().tzinfo
+    day_start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=local_tz)
+    day_end = day_start + timedelta(days=1)
+    time_min = day_start.isoformat()
+    time_max = day_end.isoformat()
+
+    try:
+        result = service.events().list(
+            calendarId="primary",
+            timeMin=time_min,
+            timeMax=time_max,
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=50,
+        ).execute()
+    except Exception as e:
+        print(f"Calendar fetch error: {e}")
+        return None
+
+    events = []
+    for idx, item in enumerate(result.get("items", [])):
+        # Skip declined events
+        for attendee in item.get("attendees", []):
+            if attendee.get("self") and attendee.get("responseStatus") == "declined":
+                break
+        else:
+            pass  # process event below
+
+        start_raw = item.get("start", {})
+        end_raw = item.get("end", {})
+
+        # All-day events use "date", timed events use "dateTime"
+        if "dateTime" in start_raw:
+            start_dt = datetime.fromisoformat(start_raw["dateTime"])
+            end_dt = datetime.fromisoformat(end_raw["dateTime"])
+            time_str = start_dt.strftime("%H:%M")
+            duration_mins = int((end_dt - start_dt).total_seconds() / 60)
+            duration_str = f"{duration_mins}m"
+        else:
+            time_str = "All day"
+            duration_str = "All day"
+
+        location = item.get("location", "")
+        hangout_link = item.get("hangoutLink", "")
+        conference_data = item.get("conferenceData", {})
+
+        # Detect virtual meeting
+        is_virtual = bool(hangout_link) or bool(conference_data)
+        if not is_virtual and location:
+            loc_lower = location.lower()
+            is_virtual = any(kw in loc_lower for kw in _VIRTUAL_KEYWORDS)
+            if any(kw in loc_lower for kw in _VIRTUAL_KEYWORDS):
+                # Extract the meeting link if location is a URL
+                pass
+
+        attendees = [
+            a.get("displayName") or a.get("email", "")
+            for a in item.get("attendees", [])
+            if not a.get("self")
+        ]
+
+        # Prefer hangout link for virtual join
+        join_url = hangout_link
+        if not join_url and conference_data:
+            entry_points = conference_data.get("entryPoints", [])
+            for ep in entry_points:
+                if ep.get("entryPointType") == "video":
+                    join_url = ep.get("uri", "")
+                    break
+
+        events.append({
+            "id": item.get("id", str(idx)),
+            "title": item.get("summary", "(No title)"),
+            "time": time_str,
+            "duration": duration_str,
+            "location": location or ("Google Meet" if is_virtual else ""),
+            "attendees": attendees,
+            "virtual": is_virtual,
+            "color": _EVENT_COLORS[idx % len(_EVENT_COLORS)],
+            "description": item.get("description", ""),
+            "joinUrl": join_url,
+            "htmlLink": item.get("htmlLink", ""),
+        })
+
+    return events
 
 
 def _header(headers, name):
@@ -164,11 +295,23 @@ async def handle_command(command: str, args: Dict[str, Any]) -> Dict[str, Any]:
             except Exception as e:
                 print(f"Gmail summary error: {e}")
 
+        calendar_summary = {"meetings": 0, "next_meeting": None}
+        cal_events = _fetch_calendar_events()
+        if cal_events is not None:
+            timed = [e for e in cal_events if e["time"] != "All day"]
+            calendar_summary["meetings"] = len(cal_events)
+            now_str = datetime.now().strftime("%H:%M")
+            upcoming = [e for e in timed if e["time"] >= now_str]
+            if upcoming:
+                calendar_summary["next_meeting"] = {"title": upcoming[0]["title"], "time": upcoming[0]["time"]}
+        else:
+            calendar_summary = {"meetings": 4, "next_meeting": {"title": "Team Standup", "time": "10:00"}}
+
         return {
             "success": True,
             "result": {
                 "email": email_summary,
-                "calendar": {"meetings": 4, "next_meeting": {"title": "Team Standup", "time": "10:00 AM"}},
+                "calendar": calendar_summary,
                 "tasks": {"high": 5, "total": 15},
                 "recent_activity": [
                     {"type": "email", "message": "Inbox fetched from Gmail", "timestamp": datetime.now().isoformat()}
@@ -216,13 +359,25 @@ async def handle_command(command: str, args: Dict[str, Any]) -> Dict[str, Any]:
         }
     
     elif command == "get_calendar_events":
+        date_str = args.get("date")
+        target_date = None
+        if date_str:
+            try:
+                target_date = datetime.fromisoformat(date_str).date()
+            except Exception:
+                pass
+        real_events = _fetch_calendar_events(target_date)
+        if real_events is not None:
+            return {"success": True, "result": {"events": real_events, "source": "google_calendar"}}
+        # Fallback stub
         return {
             "success": True,
             "result": {
                 "events": [
-                    {"id": "1", "title": "Team Standup", "time": "10:00 AM", "location": "Conference Room A", "attendees": ["alice@company.com"]},
-                    {"id": "2", "title": "Client Call", "time": "2:00 PM", "attendees": ["client@example.com"]}
-                ]
+                    {"id": "1", "title": "Team Standup", "time": "10:00", "duration": "30m", "location": "Google Meet", "attendees": [], "virtual": True, "color": "#6366f1", "joinUrl": "", "htmlLink": ""},
+                    {"id": "2", "title": "Client Call", "time": "14:00", "duration": "60m", "location": "Zoom", "attendees": [], "virtual": True, "color": "#3b82f6", "joinUrl": "", "htmlLink": ""}
+                ],
+                "source": "stub"
             }
         }
     
@@ -230,6 +385,45 @@ async def handle_command(command: str, args: Dict[str, Any]) -> Dict[str, Any]:
         message = args.get("message", "")
         return {"success": True, "result": {"response": f"I understand: '{message}'. I'm here to help!"}}
     
+    elif command == "create_calendar_event":
+        title = args.get("title", "New Event")
+        date_str = args.get("date")
+        start_time = args.get("start_time")
+        end_time = args.get("end_time")
+        description = args.get("description", "")
+
+        service = _get_calendar_service()
+        if not service:
+            return {"success": False, "error": "Google Calendar not connected. Check your credentials in .env"}
+
+        try:
+            # Get local UTC offset as +HH:MM (RFC3339 format)
+            offset_str = datetime.now().astimezone().strftime('%z')  # e.g. '+0530'
+            tz_offset = f"{offset_str[:3]}:{offset_str[3:]}"        # e.g. '+05:30'
+
+            if date_str and start_time and end_time:
+                event_body = {
+                    "summary": title,
+                    "description": description,
+                    "start": {"dateTime": f"{date_str}T{start_time}:00{tz_offset}"},
+                    "end":   {"dateTime": f"{date_str}T{end_time}:00{tz_offset}"},
+                }
+            elif date_str:
+                # All-day event
+                event_body = {
+                    "summary": title,
+                    "description": description,
+                    "start": {"date": date_str},
+                    "end":   {"date": date_str},
+                }
+            else:
+                return {"success": False, "error": "Date is required"}
+
+            created = service.events().insert(calendarId="primary", body=event_body).execute()
+            return {"success": True, "result": {"event_id": created.get("id"), "htmlLink": created.get("htmlLink", "")}}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     elif command in ["add_task", "toggle_task", "delete_task", "check_new_emails", "evening_routine", "draft_reply"]:
         return {"success": True}
     
