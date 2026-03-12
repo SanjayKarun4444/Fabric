@@ -69,7 +69,10 @@ def _get_gmail_service():
             token=None, refresh_token=refresh_token,
             token_uri="https://oauth2.googleapis.com/token",
             client_id=client_id, client_secret=client_secret,
-            scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+            scopes=[
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/gmail.compose",
+            ],
         )
         _gmail_service = build("gmail", "v1", credentials=creds, cache_discovery=False)
         return _gmail_service
