@@ -208,7 +208,20 @@ class AgentOrchestrator:
 
     async def _execute_task(self, agent, task: QueuedTask) -> None:
         try:
-            await agent.run(task.input)
+            result = await agent.run(task.input)
+            await self.event_bus.publish(Event(
+                type=EventType.TASK_RESULT,
+                payload={
+                    "task_id": task.task_id,
+                    "agent": task.agent_name,
+                    "intent": task.input.intent,
+                    "success": result.success,
+                    "result": result.result,
+                    "error": result.error,
+                },
+                source="orchestrator",
+                workflow_id=task.input.workflow_id,
+            ))
         except Exception as e:
             if task.retries < task.max_retries:
                 task.retries += 1

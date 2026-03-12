@@ -408,8 +408,10 @@ export default function AgentMonitor() {
   const [eventFeed, setEventFeed] = useState([]);     // global event stream
   const [chatInput, setChatInput] = useState('');
   const [chatHistory, setChatHistory] = useState([]);
+  const [chatPending, setChatPending] = useState(false);
   const feedRef = useRef(null);
   const pollRef = useRef(null);
+  const pendingTimeoutRef = useRef(null);
 
   const addFeedEvent = useCallback((msg, type = 'info') => {
     setEventFeed(prev => [
@@ -463,6 +465,23 @@ export default function AgentMonitor() {
         if (et === 'agent.state_changed' && msg.payload) {
           mergeAgent(msg.payload);
         }
+
+        // Route assistant_agent task results back to the chat UI
+        if (et === 'task.result' && msg.payload?.agent === 'assistant_agent') {
+          const response = msg.payload?.result?.response || (msg.payload?.success ? 'Done.' : (msg.payload?.error || 'Something went wrong.'));
+          clearTimeout(pendingTimeoutRef.current);
+          setChatHistory(prev => {
+            const lastPending = [...prev].reverse().findIndex(m => m.pending);
+            if (lastPending >= 0) {
+              const idx = prev.length - 1 - lastPending;
+              return [...prev.slice(0, idx), { role: 'assistant', content: response }, ...prev.slice(idx + 1)];
+            }
+            return [...prev, { role: 'assistant', content: response }];
+          });
+          setChatPending(false);
+          addFeedEvent('🤖 Assistant responded', 'success');
+        }
+
         // Surface interesting events in the feed
         const feedTypes = {
           'inbox.triaged': '📧 Inbox triaged',
@@ -472,8 +491,11 @@ export default function AgentMonitor() {
           'research.completed': '🔍 Research completed',
           'workflow.completed': '🎯 Workflow completed',
           'agent.failed': '⚠️ Agent failed',
+          'task.result': '✓ Agent task complete',
         };
-        if (feedTypes[et]) addFeedEvent(`${feedTypes[et]}${msg.payload ? ` — ${JSON.stringify(msg.payload).slice(0, 60)}` : ''}`, et === 'agent.failed' ? 'error' : 'success');
+        if (feedTypes[et] && et !== 'task.result') {
+          addFeedEvent(`${feedTypes[et]}${msg.payload ? ` — ${JSON.stringify(msg.payload).slice(0, 60)}` : ''}`, et === 'agent.failed' ? 'error' : 'success');
+        }
       }
 
       if (msg.type === 'agents' && Array.isArray(msg.agents)) {
@@ -486,6 +508,7 @@ export default function AgentMonitor() {
 
     return () => {
       clearInterval(pollRef.current);
+      clearTimeout(pendingTimeoutRef.current);
       unsub?.();
     };
   }, [fetchAgents, mergeAgent, addFeedEvent]);
@@ -536,16 +559,36 @@ export default function AgentMonitor() {
   };
 
   const handleChat = async () => {
-    if (!chatInput.trim()) return;
+    if (!chatInput.trim() || chatPending) return;
     const msg = chatInput.trim();
     setChatInput('');
-    setChatHistory(prev => [...prev, { role: 'user', content: msg }]);
-    addFeedEvent(`💬 Chat: "${msg.slice(0, 50)}…"`, 'info');
+    setChatHistory(prev => [...prev, { role: 'user', content: msg }, { role: 'assistant', content: '…', pending: true }]);
+    setChatPending(true);
+    addFeedEvent(`💬 Chat: "${msg.slice(0, 60)}"`, 'info');
+
+    // Fallback: if no task.result arrives within 30s, show a timeout message
+    pendingTimeoutRef.current = setTimeout(() => {
+      setChatHistory(prev => {
+        const lastPending = [...prev].reverse().findIndex(m => m.pending);
+        if (lastPending < 0) return prev;
+        const idx = prev.length - 1 - lastPending;
+        return [...prev.slice(0, idx), { role: 'assistant', content: 'The backend took too long to respond. Check that the Python server is running.' }, ...prev.slice(idx + 1)];
+      });
+      setChatPending(false);
+    }, 30000);
+
     try {
-      await window.electronAPI?.sendAgentCommand?.('user_chat', { message: msg });
-      setChatHistory(prev => [...prev, { role: 'assistant', content: 'Working on it… Check the activity logs above as agents process your request.' }]);
+      // Use the dedicated chat channel — routes directly to assistant_agent
+      await window.electronAPI?.sendChatMessage?.(msg);
     } catch (e) {
-      setChatHistory(prev => [...prev, { role: 'assistant', content: `Error: ${e.message}` }]);
+      clearTimeout(pendingTimeoutRef.current);
+      setChatHistory(prev => {
+        const lastPending = [...prev].reverse().findIndex(m => m.pending);
+        if (lastPending < 0) return [...prev, { role: 'assistant', content: `Error: ${e.message}` }];
+        const idx = prev.length - 1 - lastPending;
+        return [...prev.slice(0, idx), { role: 'assistant', content: `Error: ${e.message}` }, ...prev.slice(idx + 1)];
+      });
+      setChatPending(false);
     }
   };
 
@@ -705,15 +748,24 @@ export default function AgentMonitor() {
             {/* Chat history */}
             {chatHistory.length > 0 && (
               <div style={{ marginBottom: 10, maxHeight: 120, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {chatHistory.slice(-4).map((m, i) => (
+                {chatHistory.slice(-6).map((m, i) => (
                   <div key={i} style={{
                     padding: '7px 10px', borderRadius: 'var(--r)',
                     background: m.role === 'user' ? 'var(--accent-s)' : 'var(--s2)',
                     border: `1px solid ${m.role === 'user' ? 'var(--accent-b)' : 'var(--border)'}`,
                     alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
                     maxWidth: '85%',
+                    opacity: m.pending ? 0.6 : 1,
                   }}>
-                    <p style={{ fontSize: 12, color: m.role === 'user' ? 'var(--accent)' : 'var(--text-2)', lineHeight: 1.5 }}>{m.content}</p>
+                    {m.pending ? (
+                      <motion.p
+                        animate={{ opacity: [0.4, 1, 0.4] }}
+                        transition={{ duration: 1.2, repeat: Infinity }}
+                        style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.5 }}
+                      >thinking…</motion.p>
+                    ) : (
+                      <p style={{ fontSize: 12, color: m.role === 'user' ? 'var(--accent)' : 'var(--text-2)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{m.content}</p>
+                    )}
                   </div>
                 ))}
               </div>
@@ -738,17 +790,20 @@ export default function AgentMonitor() {
               />
               <button
                 onClick={handleChat}
-                disabled={!chatInput.trim()}
+                disabled={!chatInput.trim() || chatPending}
                 style={{
                   padding: '9px 16px', borderRadius: 'var(--r)',
-                  background: chatInput.trim() ? 'var(--accent)' : 'var(--s2)',
-                  border: 'none', color: chatInput.trim() ? '#fff' : 'var(--text-3)',
-                  cursor: chatInput.trim() ? 'pointer' : 'not-allowed',
+                  background: chatInput.trim() && !chatPending ? 'var(--accent)' : 'var(--s2)',
+                  border: 'none', color: chatInput.trim() && !chatPending ? '#fff' : 'var(--text-3)',
+                  cursor: chatInput.trim() && !chatPending ? 'pointer' : 'not-allowed',
                   display: 'flex', alignItems: 'center', gap: 6,
                   fontSize: 13, fontWeight: 600, transition: 'all 0.15s',
+                  minWidth: 80, justifyContent: 'center',
                 }}
               >
-                <Send size={13} /> Send
+                {chatPending
+                  ? <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}><RefreshCw size={13} /></motion.div>
+                  : <><Send size={13} /> Send</>}
               </button>
             </div>
           </div>

@@ -29,6 +29,8 @@ class EventType(str, Enum):
     WORKFLOW_COMPLETED = "workflow.completed"
     MORNING_ROUTINE = "system.morning_routine"
     EVENING_ROUTINE = "system.evening_routine"
+    # Task completion — carries the agent's full result back to the UI
+    TASK_RESULT = "task.result"
 
 
 class Event(BaseModel):

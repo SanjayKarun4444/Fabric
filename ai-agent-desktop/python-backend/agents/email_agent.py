@@ -80,14 +80,60 @@ class EmailAgent(BaseAgent):
         )
 
     async def _draft_reply(self, input: AgentInput) -> AgentOutput:
+        """
+        Two modes:
+        - Compose new: parameters has `to`, `subject`, `body` (dispatched by AssistantAgent)
+        - Reply to existing: parameters has `email_id` (direct call from UI)
+        """
         gmail = self.get_tool("gmail")
         claude = self.get_tool("claude")
-        email_id = input.parameters.get("email_id")
-        tone = input.parameters.get("tone", "professional")
+        params = input.parameters
+        tone = params.get("tone", "professional")
 
+        # ── Compose new email ─────────────────────────────────────────────────
+        if params.get("to"):
+            to = params["to"]
+            subject = params.get("subject", "")
+            body = params.get("body", "")
+
+            # If body is sparse, enrich it with Claude
+            if not body or len(body) < 20:
+                enriched = await claude.execute(
+                    system=f"You are a professional executive assistant. Tone: {tone}.",
+                    prompt=(
+                        f"Write a concise, professional email.\n"
+                        f"To: {to}\nSubject: {subject}\n"
+                        "Keep it brief (2-4 sentences). Return only the email body, no greeting/sign-off."
+                    ),
+                )
+                body = enriched.data or body
+
+            draft_result = await gmail.execute(
+                action="create_draft", to=to, subject=subject, body=body
+            )
+            if draft_result.success:
+                return AgentOutput(
+                    task_id=input.task_id, agent=self.name, success=True,
+                    result={"draft_id": draft_result.data.get("draft_id"), "to": to,
+                            "subject": subject, "body": body, "status": "draft_created"},
+                )
+            else:
+                # create_draft failed (likely missing scope) — return the body Claude wrote
+                # so the user at least sees what would have been sent
+                return AgentOutput(
+                    task_id=input.task_id, agent=self.name, success=True,
+                    result={
+                        "to": to, "subject": subject, "body": body,
+                        "status": "draft_preview",
+                        "note": draft_result.error or "Could not save to Gmail — showing preview only",
+                    },
+                )
+
+        # ── Reply to existing email ───────────────────────────────────────────
+        email_id = params.get("email_id")
         if not email_id:
             return AgentOutput(task_id=input.task_id, agent=self.name,
-                               success=False, error="email_id is required")
+                               success=False, error="Provide either 'to' (new email) or 'email_id' (reply)")
 
         email = await gmail.execute(action="get_email", email_id=email_id)
         if not email.success:

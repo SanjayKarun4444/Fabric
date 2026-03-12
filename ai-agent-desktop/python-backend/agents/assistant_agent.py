@@ -1,3 +1,4 @@
+import asyncio
 import json
 from agents.base_agent import BaseAgent
 from models.messages import AgentInput, AgentOutput
@@ -42,31 +43,129 @@ class AssistantAgent(BaseAgent):
 
     async def _user_chat(self, input: AgentInput) -> AgentOutput:
         """
-        General-purpose chat. Uses Claude to interpret the message,
-        then optionally dispatches a workflow.
+        Parse the user's free-form message into a structured action using Claude,
+        then execute it — dispatch to specialist agents or answer directly.
         """
         claude = self.get_tool("claude")
         message = input.parameters.get("message", input.intent)
 
-        # Get user context from memory
-        user_context = await self.memory.get_context(input.workflow_id or input.task_id)
-
-        response = await claude.execute(
+        # Step 1: classify intent
+        parse_result = await claude.execute(
             system=(
-                "You are Fabric AI, a personal AI chief of staff. "
-                "You help the user manage their email, calendar, tasks, and research. "
-                "Be concise, helpful, and proactive. "
-                "If the user wants to take an action (e.g., 'triage my inbox', 'prepare for tomorrow'), "
-                "acknowledge that you're on it and describe what you'll do. "
-                f"User context: {user_context}"
+                "You are an intent router for a personal AI chief of staff. "
+                "Classify the user request and return ONLY a valid JSON object — no markdown, no explanation:\n"
+                "{\n"
+                '  "action": "answer" | "draft_email" | "workflow" | "search" | "create_task" | "calendar",\n'
+                '  "workflow": null | "morning_routine" | "handle_inbox" | "daily_summary" | "prepare_for_tomorrow",\n'
+                '  "to": null | "recipient name or email",\n'
+                '  "subject": null | "email subject",\n'
+                '  "body": null | "email body text",\n'
+                '  "query": null | "search query or task title",\n'
+                '  "direct_answer": null | "short direct answer when action is answer"\n'
+                "}\n"
+                "Examples:\n"
+                "- 'Email John about the meeting tomorrow' → {\"action\":\"draft_email\",\"to\":\"John\",\"subject\":\"Meeting tomorrow\",\"body\":\"...\", ...}\n"
+                "- 'Prepare me for tomorrow' → {\"action\":\"workflow\",\"workflow\":\"prepare_for_tomorrow\", ...}\n"
+                "- 'Search for Python async tips' → {\"action\":\"search\",\"query\":\"Python async tips\", ...}\n"
+                "- 'Add a task to review the Q1 report' → {\"action\":\"create_task\",\"query\":\"Review Q1 report\", ...}\n"
+                "- 'What is the capital of France?' → {\"action\":\"answer\",\"direct_answer\":\"Paris.\", ...}"
             ),
             prompt=message,
+            as_json=True,
         )
 
+        # Fallback to plain conversational response if JSON parsing failed
+        if not parse_result.success or not isinstance(parse_result.data, dict):
+            conv = await claude.execute(
+                system="You are Fabric AI, a personal AI chief of staff. Be concise and helpful.",
+                prompt=message,
+            )
+            return AgentOutput(
+                task_id=input.task_id, agent=self.name, success=True,
+                result={"response": conv.data or "I'm here — could you rephrase that?", "message": message},
+            )
+
+        action = parse_result.data.get("action", "answer")
+        response_text = ""
+
+        if action == "draft_email":
+            to = parse_result.data.get("to") or ""
+            subject = parse_result.data.get("subject") or ""
+            body = parse_result.data.get("body") or ""
+            await self._orchestrator.dispatch(
+                intent="draft_reply",
+                parameters={"to": to, "subject": subject, "body": body},
+                agent_name="email_agent",
+                workflow_id=input.workflow_id,
+            )
+            response_text = (
+                f"Drafting an email to {to or 'the recipient'} — "
+                f"subject: '{subject or '(untitled)'}'. Email Agent is on it."
+            )
+
+        elif action == "workflow":
+            workflow = parse_result.data.get("workflow")
+            labels = {
+                "morning_routine": "Morning Briefing",
+                "handle_inbox": "Handle Inbox",
+                "daily_summary": "Daily Summary",
+                "prepare_for_tomorrow": "Prepare for Tomorrow",
+            }
+            if workflow and workflow in labels:
+                asyncio.create_task(self._orchestrator.run_named_workflow(workflow))
+                response_text = (
+                    f"Starting {labels[workflow]} — your agents are working on it. "
+                    "Watch the event feed for progress."
+                )
+            else:
+                response_text = (
+                    "I'm not sure which workflow you mean. "
+                    "Options: Morning Briefing, Handle Inbox, Daily Summary, Prepare for Tomorrow."
+                )
+
+        elif action == "search":
+            query = parse_result.data.get("query") or message
+            await self._orchestrator.dispatch(
+                intent="web_search",
+                parameters={"query": query},
+                agent_name="research_agent",
+                workflow_id=input.workflow_id,
+            )
+            response_text = f"Searching for '{query}'. Research Agent is on it — results will appear in the event feed."
+
+        elif action == "create_task":
+            title = parse_result.data.get("query") or message
+            await self._orchestrator.dispatch(
+                intent="create_task",
+                parameters={"title": title},
+                agent_name="task_agent",
+                workflow_id=input.workflow_id,
+            )
+            response_text = f"Creating task: '{title}'. Task Agent has it."
+
+        elif action == "calendar":
+            await self._orchestrator.dispatch(
+                intent="get_today_meetings",
+                parameters={},
+                agent_name="calendar_agent",
+                workflow_id=input.workflow_id,
+            )
+            response_text = "Fetching your schedule. Calendar Agent is checking your meetings."
+
+        else:  # "answer"
+            direct = parse_result.data.get("direct_answer")
+            if direct:
+                response_text = direct
+            else:
+                conv = await claude.execute(
+                    system="You are Fabric AI, a personal AI chief of staff. Answer concisely and helpfully.",
+                    prompt=message,
+                )
+                response_text = conv.data or "I'm here to help — could you elaborate?"
+
         return AgentOutput(
-            task_id=input.task_id, agent=self.name, success=response.success,
-            result={"response": response.data, "message": message},
-            error=response.error,
+            task_id=input.task_id, agent=self.name, success=True,
+            result={"response": response_text, "message": message},
         )
 
     async def _compile_briefing(self, input: AgentInput) -> AgentOutput:

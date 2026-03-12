@@ -18,7 +18,7 @@ class GmailTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Gmail API — fetch inbox, read emails, search threads, get counts"
+        return "Gmail API — fetch inbox, read emails, search threads, get counts, create drafts"
 
     async def execute(self, action: str, **kwargs) -> ToolResult:
         handlers = {
@@ -26,6 +26,7 @@ class GmailTool(BaseTool):
             "get_email": self._get_email,
             "search": self._search,
             "get_counts": self._get_counts,
+            "create_draft": self._create_draft,
         }
         handler = handlers.get(action)
         if not handler:
@@ -99,6 +100,33 @@ class GmailTool(BaseTool):
             "unread": unread.get("resultSizeEstimate", 0),
             "urgent": urgent.get("resultSizeEstimate", 0),
         })
+
+    async def _create_draft(self, to: str = "", subject: str = "", body: str = "", **_) -> ToolResult:
+        service = self._get_service()
+        if service is None:
+            return ToolResult(
+                success=False,
+                error="Gmail not connected — re-authenticate with get_refresh_token.py to enable drafts",
+            )
+        import base64
+        from email.mime.text import MIMEText
+        try:
+            mime = MIMEText(body)
+            mime["to"] = to
+            mime["subject"] = subject
+            raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
+            draft = service.users().drafts().create(
+                userId="me", body={"message": {"raw": raw}}
+            ).execute()
+            return ToolResult(success=True, data={"draft_id": draft.get("id"), "to": to, "subject": subject})
+        except Exception as e:
+            # Likely missing gmail.compose scope — give a clear message
+            if "insufficientPermissions" in str(e) or "403" in str(e):
+                return ToolResult(
+                    success=False,
+                    error="Missing gmail.compose scope — run get_refresh_token.py to re-authenticate, then update GOOGLE_REFRESH_TOKEN in .env",
+                )
+            raise
 
     def _humanize_date(self, date_str: str) -> str:
         try:
