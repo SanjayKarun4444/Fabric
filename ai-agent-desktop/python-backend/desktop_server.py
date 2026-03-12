@@ -1,52 +1,80 @@
-﻿from fastapi import FastAPI
+"""
+Fabric AI Desktop — Python Backend v2.0
+FastAPI server with multi-agent architecture.
+Entry: uvicorn desktop_server:app --host 127.0.0.1 --port 3001
+"""
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-from pydantic import BaseModel
+
+from config import settings
+from observability.logger import get_logger
+from db.sqlite import init_db
+
+from core.event_bus import EventBus
+from core.task_queue import TaskQueue
+from core.registry import AgentRegistry
+from core.orchestrator import AgentOrchestrator
+from core.scheduler import Scheduler
+
+from memory.manager import MemoryManager
+
+from tools.registry import ToolRegistry
+from tools.claude_tool import ClaudeTool
+from tools.gmail_tool import GmailTool
+from tools.calendar_tool import CalendarTool
+from tools.search_tool import SearchTool
+from tools.task_db_tool import TaskDBTool
+
+from agents.email_agent import EmailAgent
+from agents.calendar_agent import CalendarAgent
+from agents.task_agent import TaskAgent
+from agents.research_agent import ResearchAgent
+from agents.finance_agent import FinanceAgent
+from agents.assistant_agent import AssistantAgent
+
+from api.websocket import ws_endpoint, manager as ws_manager
+from api.routes.agents import make_router as make_agents_router
+from api.routes.chat import make_router as make_chat_router
+from api.routes.health import make_router as make_health_router
+
 from typing import Optional, Dict, Any
 import asyncio
-from datetime import datetime, timezone, timedelta
-import os
-import base64
-import email as email_lib
-
+from datetime import datetime
 from dotenv import load_dotenv
-load_dotenv()
 
-# Gmail API setup
+load_dotenv()
+_logger = get_logger("server")
+
+# ── Google service lazy loaders ───────────────────────────────────────────────
+
 _gmail_service = None
 _calendar_service = None
 
-_EVENT_COLORS = ['#6366f1', '#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#ec4899', '#14b8a6']
-_VIRTUAL_KEYWORDS = {'zoom', 'meet', 'teams', 'webex', 'skype', 'slack', 'whereby', 'bluejeans'}
 
 def _get_gmail_service():
     global _gmail_service
     if _gmail_service is not None:
         return _gmail_service
-
-    client_id = os.getenv("GOOGLE_CLIENT_ID")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-    refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
-
+    client_id = settings.google_client_id
+    client_secret = settings.google_client_secret
+    refresh_token = settings.google_refresh_token
     if not all([client_id, client_secret, refresh_token]):
         return None
-
     try:
         from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
-
         creds = Credentials(
-            token=None,
-            refresh_token=refresh_token,
+            token=None, refresh_token=refresh_token,
             token_uri="https://oauth2.googleapis.com/token",
-            client_id=client_id,
-            client_secret=client_secret,
+            client_id=client_id, client_secret=client_secret,
             scopes=["https://www.googleapis.com/auth/gmail.readonly"],
         )
         _gmail_service = build("gmail", "v1", credentials=creds, cache_discovery=False)
         return _gmail_service
     except Exception as e:
-        print(f"Gmail init error: {e}")
+        _logger.error(f"Gmail init error: {e}")
         return None
 
 
@@ -54,193 +82,100 @@ def _get_calendar_service():
     global _calendar_service
     if _calendar_service is not None:
         return _calendar_service
-
-    client_id = os.getenv("GOOGLE_CLIENT_ID")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-    refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
-
+    client_id = settings.google_client_id
+    client_secret = settings.google_client_secret
+    refresh_token = settings.google_refresh_token
     if not all([client_id, client_secret, refresh_token]):
         return None
-
     try:
         from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
-
         creds = Credentials(
-            token=None,
-            refresh_token=refresh_token,
+            token=None, refresh_token=refresh_token,
             token_uri="https://oauth2.googleapis.com/token",
-            client_id=client_id,
-            client_secret=client_secret,
+            client_id=client_id, client_secret=client_secret,
             scopes=["https://www.googleapis.com/auth/calendar"],
         )
         _calendar_service = build("calendar", "v3", credentials=creds, cache_discovery=False)
         return _calendar_service
     except Exception as e:
-        print(f"Calendar init error: {e}")
+        _logger.error(f"Calendar init error: {e}")
         return None
 
 
-def _fetch_calendar_events(target_date=None):
-    service = _get_calendar_service()
-    if service is None:
-        return None
+# ── App singletons ─────────────────────────────────────────────────────────────
 
-    if target_date is None:
-        target_date = datetime.now().date()
-
-    # Build RFC3339 time bounds for the target day
-    local_tz = datetime.now().astimezone().tzinfo
-    day_start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=local_tz)
-    day_end = day_start + timedelta(days=1)
-    time_min = day_start.isoformat()
-    time_max = day_end.isoformat()
-
-    try:
-        result = service.events().list(
-            calendarId="primary",
-            timeMin=time_min,
-            timeMax=time_max,
-            singleEvents=True,
-            orderBy="startTime",
-            maxResults=50,
-        ).execute()
-    except Exception as e:
-        print(f"Calendar fetch error: {e}")
-        return None
-
-    events = []
-    for idx, item in enumerate(result.get("items", [])):
-        # Skip declined events
-        for attendee in item.get("attendees", []):
-            if attendee.get("self") and attendee.get("responseStatus") == "declined":
-                break
-        else:
-            pass  # process event below
-
-        start_raw = item.get("start", {})
-        end_raw = item.get("end", {})
-
-        # All-day events use "date", timed events use "dateTime"
-        if "dateTime" in start_raw:
-            start_dt = datetime.fromisoformat(start_raw["dateTime"])
-            end_dt = datetime.fromisoformat(end_raw["dateTime"])
-            time_str = start_dt.strftime("%H:%M")
-            duration_mins = int((end_dt - start_dt).total_seconds() / 60)
-            duration_str = f"{duration_mins}m"
-        else:
-            time_str = "All day"
-            duration_str = "All day"
-
-        location = item.get("location", "")
-        hangout_link = item.get("hangoutLink", "")
-        conference_data = item.get("conferenceData", {})
-
-        # Detect virtual meeting
-        is_virtual = bool(hangout_link) or bool(conference_data)
-        if not is_virtual and location:
-            loc_lower = location.lower()
-            is_virtual = any(kw in loc_lower for kw in _VIRTUAL_KEYWORDS)
-            if any(kw in loc_lower for kw in _VIRTUAL_KEYWORDS):
-                # Extract the meeting link if location is a URL
-                pass
-
-        attendees = [
-            a.get("displayName") or a.get("email", "")
-            for a in item.get("attendees", [])
-            if not a.get("self")
-        ]
-
-        # Prefer hangout link for virtual join
-        join_url = hangout_link
-        if not join_url and conference_data:
-            entry_points = conference_data.get("entryPoints", [])
-            for ep in entry_points:
-                if ep.get("entryPointType") == "video":
-                    join_url = ep.get("uri", "")
-                    break
-
-        events.append({
-            "id": item.get("id", str(idx)),
-            "title": item.get("summary", "(No title)"),
-            "time": time_str,
-            "duration": duration_str,
-            "location": location or ("Google Meet" if is_virtual else ""),
-            "attendees": attendees,
-            "virtual": is_virtual,
-            "color": _EVENT_COLORS[idx % len(_EVENT_COLORS)],
-            "description": item.get("description", ""),
-            "joinUrl": join_url,
-            "htmlLink": item.get("htmlLink", ""),
-        })
-
-    return events
+_event_bus: Optional[EventBus] = None
+_orchestrator: Optional[AgentOrchestrator] = None
+_registry: Optional[AgentRegistry] = None
+_scheduler: Optional[Scheduler] = None
+_tools: Optional[ToolRegistry] = None
 
 
-def _header(headers, name):
-    for h in headers:
-        if h["name"].lower() == name.lower():
-            return h["value"]
-    return ""
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _event_bus, _orchestrator, _registry, _scheduler, _tools
+
+    _logger.info("Starting Fabric AI backend...")
+
+    await init_db()
+
+    _event_bus = EventBus()
+    task_queue = TaskQueue()
+    memory = MemoryManager()
+
+    _tools = ToolRegistry()
+    _tools.register(ClaudeTool())
+    _tools.register(GmailTool(_get_gmail_service))
+    _tools.register(CalendarTool(_get_calendar_service))
+    _tools.register(SearchTool())
+    _tools.register(TaskDBTool())
+
+    _registry = AgentRegistry()
+    _orchestrator = AgentOrchestrator(_registry, _event_bus, task_queue, memory)
+
+    _registry.register(EmailAgent(_tools, memory, _event_bus))
+    _registry.register(CalendarAgent(_tools, memory, _event_bus))
+    _registry.register(TaskAgent(_tools, memory, _event_bus))
+    _registry.register(ResearchAgent(_tools, memory, _event_bus))
+    _registry.register(FinanceAgent(_tools, memory, _event_bus))
+    _registry.register(AssistantAgent(_tools, memory, _event_bus, _orchestrator))
+
+    _scheduler = Scheduler()
+    from models.events import Event, EventType
+
+    async def _morning():
+        await _event_bus.publish(Event(type=EventType.MORNING_ROUTINE, payload={}, source="scheduler"))
+
+    async def _daily():
+        await _event_bus.publish(Event(type=EventType.DAILY_SUMMARY_REQUESTED, payload={}, source="scheduler"))
+
+    async def _evening():
+        await _event_bus.publish(Event(type=EventType.EVENING_ROUTINE, payload={}, source="scheduler"))
+
+    _scheduler.add_job("morning_routine", _morning, hour=7)
+    _scheduler.add_job("daily_summary", _daily, hour=17)
+    _scheduler.add_job("evening_routine", _evening, hour=18)
+
+    await _event_bus.start()
+    await _orchestrator.start(workers=settings.task_queue_workers)
+    await _scheduler.start()
+
+    _logger.info(f"Fabric AI backend ready — agents: {[a.name for a in _registry.all()]}")
+
+    yield
+
+    _logger.info("Shutting down Fabric AI backend...")
+    await _scheduler.stop()
+    await _orchestrator.stop()
+    await _event_bus.stop()
 
 
-def _fetch_gmail_emails(max_results=20):
-    service = _get_gmail_service()
-    if service is None:
-        return None  # signal to use stub data
+# ── FastAPI app ────────────────────────────────────────────────────────────────
 
-    results = service.users().messages().list(
-        userId="me", labelIds=["INBOX"], maxResults=max_results
-    ).execute()
-
-    messages = results.get("messages", [])
-    emails = []
-
-    for msg in messages:
-        full = service.users().messages().get(
-            userId="me", id=msg["id"], format="metadata",
-            metadataHeaders=["From", "Subject", "Date"]
-        ).execute()
-
-        headers = full.get("payload", {}).get("headers", [])
-        sender = _header(headers, "From")
-        subject = _header(headers, "Subject") or "(no subject)"
-        date_str = _header(headers, "Date")
-        snippet = full.get("snippet", "")
-        label_ids = full.get("labelIds", [])
-
-        # Rough priority: IMPORTANT label = urgent
-        priority = "urgent" if "IMPORTANT" in label_ids else "normal"
-
-        # Human-readable time
-        try:
-            from email.utils import parsedate_to_datetime
-            dt = parsedate_to_datetime(date_str)
-            now = datetime.now(dt.tzinfo)
-            delta = now - dt
-            hours = int(delta.total_seconds() // 3600)
-            if hours < 1:
-                time_label = "Just now"
-            elif hours < 24:
-                time_label = f"{hours}h ago"
-            else:
-                time_label = f"{delta.days}d ago"
-        except Exception:
-            time_label = date_str
-
-        emails.append({
-            "id": msg["id"],
-            "from": sender,
-            "subject": subject,
-            "snippet": snippet,
-            "time": time_label,
-            "priority": priority,
-            "body": snippet,
-        })
-
-    return emails
-
-app = FastAPI(title="AI Agent Desktop Backend")
+app = FastAPI(title="Fabric AI Desktop", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -250,193 +185,216 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-orchestrator = None
+
+@app.websocket("/ws")
+async def websocket_route(websocket: WebSocket):
+    await ws_endpoint(websocket, _orchestrator, _event_bus, _registry)
+
+
+@app.on_event("startup")
+async def _attach_routes():
+    app.include_router(make_agents_router(_orchestrator, _registry))
+    app.include_router(make_chat_router(_orchestrator))
+    app.include_router(make_health_router(_registry, ws_manager))
+
+
+# ── Legacy /agent/execute (Electron IPC backward-compat) ──────────────────────
+
+from pydantic import BaseModel
+
 
 class CommandRequest(BaseModel):
     command: str
     args: Optional[Dict[str, Any]] = {}
 
-@app.on_event("startup")
-async def startup():
-    print("Starting AI Agent Desktop Backend...")
-    print("Backend ready")
-
-@app.get("/health")
-async def health():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat(), "agent_ready": True}
 
 @app.post("/agent/execute")
 async def execute_command(request: CommandRequest):
     try:
-        result = await handle_command(request.command, request.args)
-        return result
+        return await _handle_legacy_command(request.command, request.args or {})
     except Exception as e:
-        print(f"Error: {e}")
+        _logger.error(f"Command error [{request.command}]: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
-async def handle_command(command: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    if command == "ping":
-        return {"success": True, "result": {"status": "ok"}}
-    
-    elif command == "get_summary":
-        email_summary = {"urgent": 3, "unread": 12}
-        service = _get_gmail_service()
-        if service:
-            try:
-                unread = service.users().messages().list(
-                    userId="me", labelIds=["INBOX", "UNREAD"], maxResults=1
-                ).execute()
-                unread_count = unread.get("resultSizeEstimate", 0)
-                important_unread = service.users().messages().list(
-                    userId="me", labelIds=["INBOX", "UNREAD", "IMPORTANT"], maxResults=1
-                ).execute()
-                urgent_count = important_unread.get("resultSizeEstimate", 0)
-                email_summary = {"urgent": urgent_count, "unread": unread_count}
-            except Exception as e:
-                print(f"Gmail summary error: {e}")
-
-        calendar_summary = {"meetings": 0, "next_meeting": None}
-        cal_events = _fetch_calendar_events()
-        if cal_events is not None:
-            timed = [e for e in cal_events if e["time"] != "All day"]
-            calendar_summary["meetings"] = len(cal_events)
-            now_str = datetime.now().strftime("%H:%M")
-            upcoming = [e for e in timed if e["time"] >= now_str]
-            if upcoming:
-                calendar_summary["next_meeting"] = {"title": upcoming[0]["title"], "time": upcoming[0]["time"]}
-        else:
-            calendar_summary = {"meetings": 4, "next_meeting": {"title": "Team Standup", "time": "10:00"}}
-
-        return {
-            "success": True,
-            "result": {
-                "email": email_summary,
-                "calendar": calendar_summary,
-                "tasks": {"high": 5, "total": 15},
-                "recent_activity": [
-                    {"type": "email", "message": "Inbox fetched from Gmail", "timestamp": datetime.now().isoformat()}
-                ]
-            }
-        }
-    
-    elif command == "triage_inbox":
-        await asyncio.sleep(1)
-        return {"success": True, "result": {"summary": "Processed 47 emails: 3 urgent, 12 important"}}
-    
-    elif command == "morning_routine":
-        await asyncio.sleep(2)
-        return {"success": True, "result": {"summary": "Good morning! 3 meetings today, 5 high-priority tasks"}}
-    
-    elif command == "daily_summary":
-        return {"success": True, "result": {"summary": "Today: 4 meetings, 8 tasks completed"}}
-    
-    elif command == "get_tasks":
-        return {
-            "success": True,
-            "result": {
-                "tasks": [
-                    {"id": "1", "title": "Review Q1 budget", "priority": "high", "completed": False, "due_date": "2024-12-31"},
-                    {"id": "2", "title": "Team meeting prep", "priority": "medium", "completed": False, "due_date": "2024-12-20"}
-                ]
-            }
-        }
-    
-    elif command == "get_emails":
-        max_results = args.get("max_results", 20)
-        real_emails = _fetch_gmail_emails(max_results=max_results)
-        if real_emails is not None:
-            return {"success": True, "result": {"emails": real_emails, "source": "gmail"}}
-        # Fallback stub
-        return {
-            "success": True,
-            "result": {
-                "emails": [
-                    {"id": "1", "from": "boss@company.com", "subject": "Q1 Budget Review", "snippet": "Please review...", "time": "2 hours ago", "priority": "urgent", "body": "Please review the attached Q1 budget analysis."},
-                    {"id": "2", "from": "team@company.com", "subject": "Sprint Planning", "snippet": "Sprint planning...", "time": "4 hours ago", "priority": "normal", "body": "Sprint planning meeting tomorrow at 2 PM."}
-                ],
-                "source": "stub"
-            }
-        }
-    
-    elif command == "get_calendar_events":
-        date_str = args.get("date")
-        target_date = None
-        if date_str:
-            try:
-                target_date = datetime.fromisoformat(date_str).date()
-            except Exception:
-                pass
-        real_events = _fetch_calendar_events(target_date)
-        if real_events is not None:
-            return {"success": True, "result": {"events": real_events, "source": "google_calendar"}}
-        # Fallback stub
-        return {
-            "success": True,
-            "result": {
-                "events": [
-                    {"id": "1", "title": "Team Standup", "time": "10:00", "duration": "30m", "location": "Google Meet", "attendees": [], "virtual": True, "color": "#6366f1", "joinUrl": "", "htmlLink": ""},
-                    {"id": "2", "title": "Client Call", "time": "14:00", "duration": "60m", "location": "Zoom", "attendees": [], "virtual": True, "color": "#3b82f6", "joinUrl": "", "htmlLink": ""}
-                ],
-                "source": "stub"
-            }
-        }
-    
-    elif command == "chat":
-        message = args.get("message", "")
-        return {"success": True, "result": {"response": f"I understand: '{message}'. I'm here to help!"}}
-    
-    elif command == "create_calendar_event":
-        title = args.get("title", "New Event")
-        date_str = args.get("date")
-        start_time = args.get("start_time")
-        end_time = args.get("end_time")
-        description = args.get("description", "")
-
-        service = _get_calendar_service()
-        if not service:
-            return {"success": False, "error": "Google Calendar not connected. Check your credentials in .env"}
-
-        try:
-            # Get local UTC offset as +HH:MM (RFC3339 format)
-            offset_str = datetime.now().astimezone().strftime('%z')  # e.g. '+0530'
-            tz_offset = f"{offset_str[:3]}:{offset_str[3:]}"        # e.g. '+05:30'
-
-            if date_str and start_time and end_time:
-                event_body = {
-                    "summary": title,
-                    "description": description,
-                    "start": {"dateTime": f"{date_str}T{start_time}:00{tz_offset}"},
-                    "end":   {"dateTime": f"{date_str}T{end_time}:00{tz_offset}"},
-                }
-            elif date_str:
-                # All-day event
-                event_body = {
-                    "summary": title,
-                    "description": description,
-                    "start": {"date": date_str},
-                    "end":   {"date": date_str},
-                }
-            else:
-                return {"success": False, "error": "Date is required"}
-
-            created = service.events().insert(calendarId="primary", body=event_body).execute()
-            return {"success": True, "result": {"event_id": created.get("id"), "htmlLink": created.get("htmlLink", "")}}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    elif command in ["add_task", "toggle_task", "delete_task", "check_new_emails", "evening_routine", "draft_reply"]:
-        return {"success": True}
-    
-    else:
-        return {"success": False, "error": f"Unknown command: {command}"}
 
 @app.get("/agent/status")
-async def get_status():
-    return {"connected": True, "active_agents": ["email", "calendar", "tasks"], "last_action": datetime.now().isoformat()}
+async def legacy_status():
+    if _registry is None:
+        return {"connected": False, "active_agents": [], "last_action": None, "agent_ready": False}
+    agents = _registry.get_summary()
+    return {
+        "connected": True,
+        "active_agents": [a["name"] for a in agents],
+        "last_action": datetime.utcnow().isoformat(),
+        "agent_ready": True,
+    }
+
+
+@app.get("/health")
+async def legacy_health():
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "agent_ready": _orchestrator is not None,
+    }
+
+
+async def _handle_legacy_command(command: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Maps old flat commands to the new agent/orchestrator system."""
+
+    if command == "ping":
+        return {"success": True, "result": {"status": "ok"}}
+
+    workflow_map = {
+        "morning_routine": "morning_routine",
+        "evening_routine": "daily_summary",
+        "daily_summary": "daily_summary",
+        "prepare_for_tomorrow": "prepare_for_tomorrow",
+        "handle_inbox": "handle_inbox",
+    }
+    if command in workflow_map:
+        wf = workflow_map[command]
+        asyncio.create_task(_orchestrator.run_named_workflow(wf))
+        return {"success": True, "result": {"status": "workflow_started", "workflow": wf}}
+
+    agent_map = {
+        "triage_inbox": ("email_agent", "triage_inbox"),
+        "draft_reply": ("email_agent", "draft_reply"),
+    }
+    if command in agent_map:
+        agent_name, intent = agent_map[command]
+        task_id = await _orchestrator.dispatch(intent=intent, parameters=args, agent_name=agent_name)
+        return {"success": True, "result": {"task_id": task_id, "status": "queued"}}
+
+    if command == "get_summary":
+        return await _get_summary()
+
+    if command == "get_emails":
+        gmail = GmailTool(_get_gmail_service)
+        r = await gmail.execute(action="fetch_inbox", max_results=args.get("max_results", 20))
+        return {"success": r.success, "result": {"emails": r.data,
+                "source": "gmail" if _get_gmail_service() else "stub"}}
+
+    if command == "get_calendar_events":
+        cal = CalendarTool(_get_calendar_service)
+        r = await cal.execute(action="list_events", date=args.get("date"))
+        return {"success": r.success, "result": {"events": r.data,
+                "source": "google_calendar" if _get_calendar_service() else "stub"}}
+
+    if command == "create_calendar_event":
+        cal = CalendarTool(_get_calendar_service)
+        r = await cal.execute(
+            action="create_event",
+            title=args.get("title", "New Event"),
+            date=args.get("date"),
+            start_time=args.get("start_time"),
+            end_time=args.get("end_time"),
+            description=args.get("description", ""),
+        )
+        return {"success": r.success, "result": r.data, "error": r.error}
+
+    if command == "get_tasks":
+        db = TaskDBTool()
+        r = await db.execute(action="list")
+        return {"success": r.success, "result": {"tasks": r.data or []}}
+
+    if command == "add_task":
+        db = TaskDBTool()
+        r = await db.execute(
+            action="create",
+            title=args.get("title", "New Task"),
+            priority=args.get("priority", "medium"),
+            description=args.get("description", ""),
+            due_date=args.get("due_date"),
+        )
+        return {"success": r.success, "result": r.data}
+
+    if command == "toggle_task":
+        task_id = await _orchestrator.dispatch(
+            intent="toggle_task",
+            parameters={"task_id": args.get("task_id")},
+            agent_name="task_agent",
+        )
+        return {"success": True, "result": {"queued": task_id}}
+
+    if command == "delete_task":
+        db = TaskDBTool()
+        r = await db.execute(action="delete", task_id=args.get("task_id"))
+        return {"success": r.success, "result": r.data}
+
+    if command == "chat":
+        task_id = await _orchestrator.dispatch(
+            intent="user_chat",
+            parameters={"message": args.get("message", "")},
+            agent_name="assistant_agent",
+        )
+        return {"success": True, "result": {"task_id": task_id, "status": "processing",
+                "response": "I'm on it — check back in a moment."}}
+
+    if command == "check_new_emails":
+        gmail = GmailTool(_get_gmail_service)
+        r = await gmail.execute(action="get_counts")
+        return {"success": r.success, "result": r.data}
+
+    if command == "get_agents":
+        if _registry is None:
+            return {"success": False, "error": "Registry not ready"}
+        return {"success": True, "result": {"agents": _registry.get_summary()}}
+
+    if command == "run_workflow":
+        workflow = args.get("workflow", "")
+        if not workflow:
+            return {"success": False, "error": "workflow name required"}
+        asyncio.create_task(_orchestrator.run_named_workflow(workflow))
+        return {"success": True, "result": {"status": "started", "workflow": workflow}}
+
+    return {"success": False, "error": f"Unknown command: {command}"}
+
+
+async def _get_summary() -> Dict[str, Any]:
+    gmail = GmailTool(_get_gmail_service)
+    cal = CalendarTool(_get_calendar_service)
+    db = TaskDBTool()
+
+    counts_r, events_r, tasks_r = await asyncio.gather(
+        gmail.execute(action="get_counts"),
+        cal.execute(action="list_events"),
+        db.execute(action="list", status="pending"),
+        return_exceptions=True,
+    )
+
+    email_summary = {"urgent": 0, "unread": 0}
+    if not isinstance(counts_r, Exception) and counts_r.success:
+        email_summary = counts_r.data or email_summary
+
+    cal_summary = {"meetings": 0, "next_meeting": None}
+    if not isinstance(events_r, Exception) and events_r.success:
+        events = events_r.data or []
+        cal_summary["meetings"] = len(events)
+        now_str = datetime.now().strftime("%H:%M")
+        upcoming = [e for e in events if e.get("time", "") >= now_str and e.get("time") != "All day"]
+        if upcoming:
+            cal_summary["next_meeting"] = {"title": upcoming[0]["title"], "time": upcoming[0]["time"]}
+
+    task_summary = {"high": 0, "total": 0}
+    if not isinstance(tasks_r, Exception) and tasks_r.success:
+        tasks = tasks_r.data or []
+        task_summary["total"] = len(tasks)
+        task_summary["high"] = len([t for t in tasks if t.get("priority") == "high"])
+
+    return {
+        "success": True,
+        "result": {
+            "email": email_summary,
+            "calendar": cal_summary,
+            "tasks": task_summary,
+            "recent_activity": [
+                {"type": "system", "message": "Fabric AI ready", "timestamp": datetime.utcnow().isoformat()}
+            ],
+        },
+    }
+
 
 if __name__ == "__main__":
-    import os
-    port = int(os.getenv("BACKEND_PORT", 3001))
-    host = os.getenv("BACKEND_HOST", "127.0.0.1")
-    print(f"Starting server on {host}:{port}...")
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    import uvicorn
+    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
