@@ -2,16 +2,21 @@ const { spawn } = require('child_process');
 const path = require('path');
 const axios = require('axios');
 const fs = require('fs');
+const WebSocket = require('ws');
 
 class AgentManager {
   constructor() {
     this.pythonProcess = null;
     this.backendUrl = `http://${process.env.BACKEND_HOST || '127.0.0.1'}:${process.env.BACKEND_PORT || 3001}`;
+    this.wsUrl = `ws://${process.env.BACKEND_HOST || '127.0.0.1'}:${process.env.BACKEND_PORT || 3001}/ws`;
     this.isReady = false;
     this.logs = [];
     this.maxLogs = 1000;
     this.retryAttempts = 3;
-    this.retryDelay = 5000; // 5 seconds
+    this.retryDelay = 5000;
+    this.ws = null;
+    this.wsReconnectTimer = null;
+    this.mainWindow = null; // set by main.js after window creation
   }
 
   async start() {
@@ -97,6 +102,8 @@ class AgentManager {
 
     // Wait for backend to be ready
     await this.waitForBackend();
+    // Connect WebSocket for real-time agent events
+    this.connectWebSocket();
   }
 
   async waitForBackend(timeout = 30000) {
@@ -193,7 +200,65 @@ class AgentManager {
     }
   }
 
+  // ── WebSocket ──────────────────────────────────────────────────────────────
+
+  connectWebSocket() {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+
+    try {
+      this.ws = new WebSocket(this.wsUrl);
+
+      this.ws.on('open', () => {
+        console.log('✓ WebSocket connected to Python backend');
+        this.addLog('info', 'WebSocket connected');
+        // Clear any pending reconnect
+        if (this.wsReconnectTimer) {
+          clearTimeout(this.wsReconnectTimer);
+          this.wsReconnectTimer = null;
+        }
+      });
+
+      this.ws.on('message', (raw) => {
+        try {
+          const msg = JSON.parse(raw.toString());
+          // Forward to renderer window via IPC
+          if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+            this.mainWindow.webContents.send('agent-update', msg);
+          }
+        } catch (_) {}
+      });
+
+      this.ws.on('close', () => {
+        console.log('WebSocket disconnected — reconnecting in 3s...');
+        this.ws = null;
+        if (this.isReady) {
+          this.wsReconnectTimer = setTimeout(() => this.connectWebSocket(), 3000);
+        }
+      });
+
+      this.ws.on('error', (err) => {
+        console.error(`WebSocket error: ${err.message}`);
+        this.ws = null;
+      });
+    } catch (err) {
+      console.error(`WebSocket connect failed: ${err.message}`);
+    }
+  }
+
+  sendWsMessage(msg) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(msg));
+      return true;
+    }
+    return false;
+  }
+
   stop() {
+    if (this.wsReconnectTimer) clearTimeout(this.wsReconnectTimer);
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
     if (this.pythonProcess) {
       console.log('Stopping Python backend...');
       this.pythonProcess.kill();

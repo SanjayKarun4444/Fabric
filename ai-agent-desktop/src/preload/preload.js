@@ -52,6 +52,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('navigate-to', subscription);
   },
   
+  // Agent WebSocket commands (routed through main process → WebSocket)
+  sendAgentCommand: (command, parameters) =>
+    ipcRenderer.invoke('ws-send', { type: 'command', command, parameters }),
+  sendChatMessage: (message, conversationId) =>
+    ipcRenderer.invoke('ws-send', { type: 'chat', message, conversation_id: conversationId || 'default' }),
+  runWorkflow: (workflow) =>
+    ipcRenderer.invoke('ws-send', { type: 'run_workflow', workflow }),
+  pauseAgent: (agentName) =>
+    ipcRenderer.invoke('ws-send', { type: 'pause_agent', agent: agentName }),
+  resumeAgent: (agentName) =>
+    ipcRenderer.invoke('ws-send', { type: 'resume_agent', agent: agentName }),
+  getAgents: () =>
+    ipcRenderer.invoke('ws-send', { type: 'get_agents' }),
+
   // System info
   platform: process.platform,
   versions: {

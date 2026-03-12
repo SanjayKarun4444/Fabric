@@ -190,6 +190,7 @@ app.whenReady().then(async () => {
 
   // Start agent manager
   agentManager = new AgentManager();
+  agentManager.mainWindow = mainWindow; // needed for WS → renderer forwarding
   await agentManager.start();
   console.log('✓ Agent manager started');
 

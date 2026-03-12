@@ -19,6 +19,14 @@ function initializeIpcHandlers(mainWindow, store) {
     }
   });
 
+  // WebSocket message forwarding — renderer → main → Python WebSocket
+  ipcMain.handle('ws-send', async (event, msg) => {
+    const agentManager = global.agentManager;
+    if (!agentManager) return { success: false, error: 'Agent not initialized' };
+    const sent = agentManager.sendWsMessage(msg);
+    return { success: sent };
+  });
+
   // Get settings
   ipcMain.handle('get-settings', async () => {
     try {
