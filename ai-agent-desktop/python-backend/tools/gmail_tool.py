@@ -102,6 +102,11 @@ class GmailTool(BaseTool):
         })
 
     async def _create_draft(self, to: str = "", subject: str = "", body: str = "", **_) -> ToolResult:
+        if not to or "@" not in to:
+            return ToolResult(
+                success=False,
+                error=f"Invalid recipient '{to}' — a full email address is required (e.g. name@example.com)",
+            )
         service = self._get_service()
         if service is None:
             return ToolResult(

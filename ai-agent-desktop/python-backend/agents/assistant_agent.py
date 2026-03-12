@@ -64,7 +64,8 @@ class AssistantAgent(BaseAgent):
                 '  "direct_answer": null | "short direct answer when action is answer"\n'
                 "}\n"
                 "Examples:\n"
-                "- 'Email John about the meeting tomorrow' → {\"action\":\"draft_email\",\"to\":\"John\",\"subject\":\"Meeting tomorrow\",\"body\":\"...\", ...}\n"
+                "- 'Email john@company.com about the meeting tomorrow' → {\"action\":\"draft_email\",\"to\":\"john@company.com\",\"subject\":\"Meeting tomorrow\",\"body\":\"...\", ...}\n"
+            "- 'Email John about the meeting' → {\"action\":\"draft_email\",\"to\":\"John\",\"subject\":\"Meeting\",\"body\":\"...\", ...} (use the name if no email given — the app will ask for it)\n"
                 "- 'Prepare me for tomorrow' → {\"action\":\"workflow\",\"workflow\":\"prepare_for_tomorrow\", ...}\n"
                 "- 'Search for Python async tips' → {\"action\":\"search\",\"query\":\"Python async tips\", ...}\n"
                 "- 'Add a task to review the Q1 report' → {\"action\":\"create_task\",\"query\":\"Review Q1 report\", ...}\n"
@@ -92,16 +93,26 @@ class AssistantAgent(BaseAgent):
             to = parse_result.data.get("to") or ""
             subject = parse_result.data.get("subject") or ""
             body = parse_result.data.get("body") or ""
-            await self._orchestrator.dispatch(
-                intent="draft_reply",
-                parameters={"to": to, "subject": subject, "body": body},
-                agent_name="email_agent",
-                workflow_id=input.workflow_id,
-            )
-            response_text = (
-                f"Drafting an email to {to or 'the recipient'} — "
-                f"subject: '{subject or '(untitled)'}'. Email Agent is on it."
-            )
+
+            # Gmail requires a valid email address — if we only have a name, ask the user
+            if to and "@" not in to:
+                response_text = (
+                    f"I need {to}'s full email address to create this draft. "
+                    f"What is their email address?"
+                )
+            elif not to:
+                response_text = "Who should I send this to? Please provide their email address."
+            else:
+                await self._orchestrator.dispatch(
+                    intent="draft_reply",
+                    parameters={"to": to, "subject": subject, "body": body},
+                    agent_name="email_agent",
+                    workflow_id=input.workflow_id,
+                )
+                response_text = (
+                    f"Drafting an email to {to} — "
+                    f"subject: '{subject or '(untitled)'}'. Email Agent is on it, check your Gmail drafts."
+                )
 
         elif action == "workflow":
             workflow = parse_result.data.get("workflow")
