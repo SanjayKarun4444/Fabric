@@ -566,13 +566,13 @@ export default function AgentMonitor() {
     setChatPending(true);
     addFeedEvent(`💬 Chat: "${msg.slice(0, 60)}"`, 'info');
 
-    // Fallback: if no task.result arrives within 30s, show a timeout message
+    // Fallback: if no task.result arrives within 45s, show a timeout message
     pendingTimeoutRef.current = setTimeout(() => {
       setChatHistory(prev => {
         const lastPending = [...prev].reverse().findIndex(m => m.pending);
         if (lastPending < 0) return prev;
         const idx = prev.length - 1 - lastPending;
-        return [...prev.slice(0, idx), { role: 'assistant', content: 'The backend took too long to respond. Check that the Python server is running.' }, ...prev.slice(idx + 1)];
+        return [...prev.slice(0, idx), { role: 'assistant', content: 'No response yet — the WebSocket may not be connected. Check the Electron console for "[AgentManager] WebSocket connected" and ensure the Python server is running.' }, ...prev.slice(idx + 1)];
       });
       setChatPending(false);
     }, 30000);

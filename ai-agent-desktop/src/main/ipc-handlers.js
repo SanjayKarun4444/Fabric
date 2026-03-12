@@ -23,7 +23,21 @@ function initializeIpcHandlers(mainWindow, store) {
   ipcMain.handle('ws-send', async (event, msg) => {
     const agentManager = global.agentManager;
     if (!agentManager) return { success: false, error: 'Agent not initialized' };
-    const sent = agentManager.sendWsMessage(msg);
+
+    let sent = agentManager.sendWsMessage(msg);
+    if (!sent) {
+      // WS wasn't ready — wait up to 4s for reconnect then retry once
+      console.warn(`[ipc ws-send] WS not ready for type="${msg.type}", waiting for reconnect...`);
+      await new Promise(r => setTimeout(r, 2000));
+      sent = agentManager.sendWsMessage(msg);
+      if (!sent) {
+        await new Promise(r => setTimeout(r, 2000));
+        sent = agentManager.sendWsMessage(msg);
+      }
+      if (!sent) {
+        console.error(`[ipc ws-send] WS still not ready after retries for type="${msg.type}"`);
+      }
+    }
     return { success: sent };
   });
 

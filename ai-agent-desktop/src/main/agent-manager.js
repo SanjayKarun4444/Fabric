@@ -28,6 +28,7 @@ class AgentManager {
       if (response.data?.status === 'healthy') {
         this.isReady = true;
         console.log('✓ Python backend already running, skipping spawn');
+        this.connectWebSocket(); // still need the WS connection
         return;
       }
     } catch (_) {}
@@ -209,12 +210,15 @@ class AgentManager {
       this.ws = new WebSocket(this.wsUrl);
 
       this.ws.on('open', () => {
-        console.log('✓ WebSocket connected to Python backend');
+        console.log(`[AgentManager] WebSocket connected to ${this.wsUrl}`);
         this.addLog('info', 'WebSocket connected');
-        // Clear any pending reconnect
         if (this.wsReconnectTimer) {
           clearTimeout(this.wsReconnectTimer);
           this.wsReconnectTimer = null;
+        }
+        // Notify renderer that WS is live
+        if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+          this.mainWindow.webContents.send('agent-update', { type: 'ws_connected' });
         }
       });
 
@@ -249,6 +253,12 @@ class AgentManager {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(msg));
       return true;
+    }
+    // WS not open — kick off a reconnect so the next message works
+    const state = this.ws ? ['CONNECTING','OPEN','CLOSING','CLOSED'][this.ws.readyState] : 'null';
+    console.warn(`[AgentManager] WS not open (state: ${state}) — triggering reconnect`);
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+      this.connectWebSocket();
     }
     return false;
   }
