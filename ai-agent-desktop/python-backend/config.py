@@ -18,6 +18,7 @@ class Settings:
 
     # Database
     db_path: str = os.getenv("DB_PATH", "fabric.db")
+    chroma_path: str = os.getenv("CHROMA_PATH", "chroma_data")
 
     # Agent config
     max_task_retries: int = 3

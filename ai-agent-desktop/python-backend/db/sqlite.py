@@ -11,6 +11,19 @@ CREATE TABLE IF NOT EXISTS memory (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS conversation_turns (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    user_msg TEXT NOT NULL,
+    assistant_msg TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    metadata TEXT DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_conv_turns
+    ON conversation_turns (user_id, conversation_id, timestamp);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,

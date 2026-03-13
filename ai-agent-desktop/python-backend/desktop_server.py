@@ -19,6 +19,7 @@ from core.orchestrator import AgentOrchestrator
 from core.scheduler import Scheduler
 
 from memory.manager import MemoryManager
+from memory.conversation_memory import ConversationMemory
 
 from tools.registry import ToolRegistry
 from tools.claude_tool import ClaudeTool
@@ -128,6 +129,10 @@ async def lifespan(app: FastAPI):
     _event_bus = EventBus()
     task_queue = TaskQueue()
     memory = MemoryManager()
+    conv_memory = ConversationMemory(
+        db_path=settings.db_path,
+        chroma_path=settings.chroma_path,
+    )
 
     _tools = ToolRegistry()
     _tools.register(ClaudeTool())
@@ -144,7 +149,7 @@ async def lifespan(app: FastAPI):
     _registry.register(TaskAgent(_tools, memory, _event_bus))
     _registry.register(ResearchAgent(_tools, memory, _event_bus))
     _registry.register(FinanceAgent(_tools, memory, _event_bus))
-    _registry.register(AssistantAgent(_tools, memory, _event_bus, _orchestrator))
+    _registry.register(AssistantAgent(_tools, memory, _event_bus, _orchestrator, conv_memory))
 
     _scheduler = Scheduler()
     from models.events import Event, EventType

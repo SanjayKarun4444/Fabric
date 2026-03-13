@@ -1,7 +1,9 @@
 import asyncio
 import json
+from datetime import date as _date
 from agents.base_agent import BaseAgent
 from models.messages import AgentInput, AgentOutput
+from memory.conversation_memory import ConversationMemory
 
 
 class AssistantAgent(BaseAgent):
@@ -12,10 +14,12 @@ class AssistantAgent(BaseAgent):
     Never calls other agents directly — uses the orchestrator.
     """
 
-    def __init__(self, tool_registry, memory, event_bus, orchestrator):
+    def __init__(self, tool_registry, memory, event_bus, orchestrator,
+                 conv_memory: ConversationMemory):
         super().__init__(tool_registry, memory, event_bus)
         self._orchestrator = orchestrator
-        # Stores a pending destructive action waiting for user confirmation.
+        self._conv_memory = conv_memory
+        # Pending destructive action awaiting user confirmation.
         # Shape: {"action": str, "params": dict, "summary": str}
         self._pending_action: dict | None = None
 
@@ -44,6 +48,45 @@ class AssistantAgent(BaseAgent):
         handler = dispatch.get(input.intent, self._user_chat)
         return await handler(input)
 
+    # ── Helpers ────────────────────────────────────────────────────────────────
+
+    def _get_ids(self, input: AgentInput) -> tuple[str, str]:
+        """Return (user_id, conversation_id) from the input."""
+        user_id = input.user_id or "default"
+        conversation_id = input.parameters.get("conversation_id", "default")
+        return user_id, conversation_id
+
+    async def _save_turn(
+        self,
+        input: AgentInput,
+        response_text: str,
+        metadata: dict | None = None,
+    ) -> None:
+        """Persist the completed turn to conversation memory (fire-and-forget errors)."""
+        try:
+            user_id, conversation_id = self._get_ids(input)
+            message = input.parameters.get("message", input.intent)
+            await self._conv_memory.add_turn(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                user_msg=message,
+                assistant_msg=response_text,
+                metadata=metadata or {},
+            )
+        except Exception:
+            pass  # Memory failures must never crash the chat
+
+    async def _build_context(self, input: AgentInput) -> str:
+        """Retrieve combined recent history + semantic memory for this turn."""
+        try:
+            user_id, conversation_id = self._get_ids(input)
+            message = input.parameters.get("message", input.intent)
+            return await self._conv_memory.build_context(user_id, conversation_id, message)
+        except Exception:
+            return ""
+
+    # ── Main chat handler ──────────────────────────────────────────────────────
+
     async def _user_chat(self, input: AgentInput) -> AgentOutput:
         """
         Parse the user's free-form message into a structured action using Claude,
@@ -51,28 +94,39 @@ class AssistantAgent(BaseAgent):
         """
         claude = self.get_tool("claude")
         message = input.parameters.get("message", input.intent)
-        from datetime import date as _date
         today_str = _date.today().isoformat()
 
-        # Step 0: handle confirmation / cancellation for a pending destructive action
+        # ── Step 0: confirmation / cancellation for a pending destructive action ──
         if self._pending_action:
             normalised = message.strip().lower()
-            confirmed = normalised in {"yes", "y", "confirm", "proceed", "do it", "go ahead", "ok", "okay", "sure", "yep", "yup"}
-            cancelled = normalised in {"no", "n", "cancel", "stop", "abort", "nope", "nah", "don't", "dont"}
+            confirmed = normalised in {
+                "yes", "y", "confirm", "proceed", "do it",
+                "go ahead", "ok", "okay", "sure", "yep", "yup",
+            }
+            cancelled = normalised in {
+                "no", "n", "cancel", "stop", "abort",
+                "nope", "nah", "don't", "dont",
+            }
             if confirmed:
                 pending = self._pending_action
                 self._pending_action = None
                 return await self._execute_confirmed_action(pending, input)
             elif cancelled:
                 self._pending_action = None
+                response_text = "Cancelled. No changes were made."
+                await self._save_turn(input, response_text, {"action": "cancel"})
                 return AgentOutput(
                     task_id=input.task_id, agent=self.name, success=True,
-                    result={"response": "Cancelled. No changes were made.", "message": message},
+                    result={"response": response_text, "message": message},
                 )
-            # Not a clear yes/no — clear the pending action and fall through to normal routing
+            # Ambiguous — clear pending and fall through to normal routing
             self._pending_action = None
 
-        # Step 1: classify intent
+        # ── Step 1: retrieve conversation memory ──────────────────────────────
+        context_block = await self._build_context(input)
+        context_suffix = f"\n\n{context_block}" if context_block else ""
+
+        # ── Step 2: classify intent ───────────────────────────────────────────
         parse_result = await claude.execute(
             system=(
                 "You are an intent router for a personal AI chief of staff. "
@@ -93,47 +147,54 @@ class AssistantAgent(BaseAgent):
                 '  "direct_answer": null | "short direct answer when action is answer"\n'
                 "}\n"
                 f"Today's date is {today_str}. Resolve relative dates like 'tomorrow', 'next Monday' to YYYY-MM-DD.\n"
+                "Use the conversation history below to resolve references like 'it', 'that', 'the same one', etc.\n"
                 "Examples:\n"
                 "- 'Email john@company.com about the meeting tomorrow' → {\"action\":\"draft_email\",\"to\":\"john@company.com\",\"subject\":\"Meeting tomorrow\",\"body\":\"...\", ...}\n"
-                "- 'Email John about the meeting' → {\"action\":\"draft_email\",\"to\":\"John\",\"subject\":\"Meeting\",\"body\":\"...\", ...} (use the name if no email given — the app will ask for it)\n"
+                "- 'Email John about the meeting' → {\"action\":\"draft_email\",\"to\":\"John\",\"subject\":\"Meeting\",\"body\":\"...\", ...}\n"
                 "- 'Prepare me for tomorrow' → {\"action\":\"workflow\",\"workflow\":\"prepare_for_tomorrow\", ...}\n"
                 "- 'Search for Python async tips' → {\"action\":\"search\",\"query\":\"Python async tips\", ...}\n"
                 "- 'Add a task to review the Q1 report' → {\"action\":\"create_task\",\"query\":\"Review Q1 report\", ...}\n"
                 "- 'Schedule a team sync tomorrow at 2pm to 3pm' → {\"action\":\"create_event\",\"event_title\":\"Team Sync\",\"event_date\":\"YYYY-MM-DD\",\"event_start_time\":\"14:00\",\"event_end_time\":\"15:00\", ...}\n"
-                "- 'Add dentist appointment on March 20 at 10am' → {\"action\":\"create_event\",\"event_title\":\"Dentist Appointment\",\"event_date\":\"YYYY-03-20\",\"event_start_time\":\"10:00\", ...}\n"
                 "- 'Delete the standup meeting tomorrow' → {\"action\":\"delete_event\",\"event_keywords\":\"standup\",\"event_date\":\"YYYY-MM-DD\", ...}\n"
                 "- 'Remove my 2pm call on Friday' → {\"action\":\"delete_event\",\"event_keywords\":\"2pm call\",\"event_date\":\"YYYY-MM-DD\", ...}\n"
                 "- 'What meetings do I have today?' → {\"action\":\"calendar\", ...}\n"
                 "- 'What is the capital of France?' → {\"action\":\"answer\",\"direct_answer\":\"Paris.\", ...}"
+                + context_suffix
             ),
             prompt=message,
             as_json=True,
         )
 
-        # Fallback to plain conversational response if JSON parsing failed
+        # Fallback: plain conversational response if JSON classification failed
         if not parse_result.success or not isinstance(parse_result.data, dict):
             conv = await claude.execute(
-                system="You are Fabric AI, a personal AI chief of staff. Be concise and helpful.",
+                system=(
+                    "You are Fabric AI, a personal AI chief of staff. Be concise and helpful."
+                    + context_suffix
+                ),
                 prompt=message,
             )
+            response_text = conv.data or "I'm here — could you rephrase that?"
+            await self._save_turn(input, response_text, {"action": "fallback"})
             return AgentOutput(
                 task_id=input.task_id, agent=self.name, success=True,
-                result={"response": conv.data or "I'm here — could you rephrase that?", "message": message},
+                result={"response": response_text, "message": message},
             )
 
         action = parse_result.data.get("action", "answer")
         response_text = ""
+
+        # ── Step 3: execute the classified action ─────────────────────────────
 
         if action == "draft_email":
             to = parse_result.data.get("to") or ""
             subject = parse_result.data.get("subject") or ""
             body = parse_result.data.get("body") or ""
 
-            # Gmail requires a valid email address — if we only have a name, ask the user
             if to and "@" not in to:
                 response_text = (
                     f"I need {to}'s full email address to create this draft. "
-                    f"What is their email address?"
+                    "What is their email address?"
                 )
             elif not to:
                 response_text = "Who should I send this to? Please provide their email address."
@@ -177,7 +238,10 @@ class AssistantAgent(BaseAgent):
                 agent_name="research_agent",
                 workflow_id=input.workflow_id,
             )
-            response_text = f"Searching for '{query}'. Research Agent is on it — results will appear in the event feed."
+            response_text = (
+                f"Searching for '{query}'. Research Agent is on it — "
+                "results will appear in the event feed."
+            )
 
         elif action == "create_task":
             title = parse_result.data.get("query") or message
@@ -209,19 +273,20 @@ class AssistantAgent(BaseAgent):
                 workflow_id=input.workflow_id,
             )
             time_str = f" at {start_time}" if start_time else ""
-            response_text = f"Adding '{title}' to your calendar on {event_date}{time_str}. Calendar Agent is on it."
+            response_text = (
+                f"Adding '{title}' to your calendar on {event_date}{time_str}. "
+                "Calendar Agent is on it."
+            )
 
         elif action == "delete_event":
             d = parse_result.data
             keywords = (d.get("event_keywords") or "").lower().strip()
             event_date = d.get("event_date") or today_str
 
-            # Fetch events for the given date and find matches
             cal = self.get_tool("calendar")
             list_result = await cal.execute(action="list_events", date=event_date)
             events = list_result.data or [] if list_result.success else []
 
-            # Filter by keyword match against title
             if keywords:
                 kw_words = keywords.split()
                 matches = [
@@ -238,8 +303,16 @@ class AssistantAgent(BaseAgent):
                 )
             elif len(matches) == 1:
                 evt = matches[0]
-                time_info = f" at {evt['time']}" if evt.get("time") and evt["time"] != "All day" else " (all day)"
-                duration = f" ({evt['duration']})" if evt.get("duration") and evt["duration"] != "All day" else ""
+                time_info = (
+                    f" at {evt['time']}"
+                    if evt.get("time") and evt["time"] != "All day"
+                    else " (all day)"
+                )
+                duration = (
+                    f" ({evt['duration']})"
+                    if evt.get("duration") and evt["duration"] != "All day"
+                    else ""
+                )
                 location = f"\nLocation: {evt['location']}" if evt.get("location") else ""
                 self._pending_action = {
                     "action": "delete_event",
@@ -254,7 +327,6 @@ class AssistantAgent(BaseAgent):
                     f"Reply **yes** to confirm, or **no** to cancel."
                 )
             else:
-                # Multiple matches — list them and ask to be more specific
                 lines = "\n".join(
                     f"• **{e['title']}** at {e.get('time', 'All day')}" for e in matches[:5]
                 )
@@ -279,21 +351,29 @@ class AssistantAgent(BaseAgent):
                 response_text = direct
             else:
                 conv = await claude.execute(
-                    system="You are Fabric AI, a personal AI chief of staff. Answer concisely and helpfully.",
+                    system=(
+                        "You are Fabric AI, a personal AI chief of staff. "
+                        "Answer concisely and helpfully."
+                        + context_suffix
+                    ),
                     prompt=message,
                 )
                 response_text = conv.data or "I'm here to help — could you elaborate?"
+
+        # ── Step 4: persist this turn to memory ───────────────────────────────
+        await self._save_turn(input, response_text, {"action": action})
 
         return AgentOutput(
             task_id=input.task_id, agent=self.name, success=True,
             result={"response": response_text, "message": message},
         )
 
-    async def _execute_confirmed_action(self, pending: dict, input: AgentInput) -> AgentOutput:
-        """Execute a previously staged destructive action after user confirmation."""
+    async def _execute_confirmed_action(
+        self, pending: dict, input: AgentInput
+    ) -> AgentOutput:
+        """Execute a staged destructive action after the user confirms."""
         action = pending["action"]
         params = pending["params"]
-        summary = pending.get("summary", action)
 
         if action == "delete_event":
             await self._orchestrator.dispatch(
@@ -306,10 +386,13 @@ class AssistantAgent(BaseAgent):
         else:
             response_text = f"Action '{action}' confirmed but no executor found."
 
+        await self._save_turn(input, response_text, {"action": f"confirmed_{action}"})
         return AgentOutput(
             task_id=input.task_id, agent=self.name, success=True,
             result={"response": response_text, "message": input.parameters.get("message", "")},
         )
+
+    # ── Workflow compilers ─────────────────────────────────────────────────────
 
     async def _compile_briefing(self, input: AgentInput) -> AgentOutput:
         """Synthesize all prior workflow step results into a meeting prep brief."""
