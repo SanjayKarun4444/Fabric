@@ -296,6 +296,11 @@ async def _handle_legacy_command(command: str, args: Dict[str, Any]) -> Dict[str
         )
         return {"success": r.success, "result": r.data, "error": r.error}
 
+    if command == "delete_calendar_event":
+        cal = CalendarTool(_get_calendar_service)
+        r = await cal.execute(action="delete_event", event_id=args.get("event_id", ""))
+        return {"success": r.success, "result": r.data, "error": r.error}
+
     if command == "get_tasks":
         db = TaskDBTool()
         r = await db.execute(action="list")

@@ -17,7 +17,7 @@ class CalendarAgent(BaseAgent):
     @property
     def capabilities(self) -> list[str]:
         return [
-            "get_today_meetings", "get_tomorrow_meetings", "create_event",
+            "get_today_meetings", "get_tomorrow_meetings", "create_event", "delete_event",
             "meeting_prep", "conflict_detection", "schedule_response_times",
         ]
 
@@ -26,6 +26,7 @@ class CalendarAgent(BaseAgent):
             "get_today_meetings": self._get_today_meetings,
             "get_tomorrow_meetings": self._get_tomorrow_meetings,
             "create_event": self._create_event,
+            "delete_event": self._delete_event,
             "meeting_prep": self._meeting_prep,
             "schedule_response_times": self._schedule_response_times,
         }
@@ -93,6 +94,28 @@ class CalendarAgent(BaseAgent):
             task_id=input.task_id, agent=self.name, success=result.success,
             result=result.data, error=result.error,
             events_emitted=[EventType.MEETING_SCHEDULED] if result.success else [],
+        )
+
+    async def _delete_event(self, input: AgentInput) -> AgentOutput:
+        cal = self.get_tool("calendar")
+        event_id = input.parameters.get("event_id")
+        if not event_id:
+            return AgentOutput(
+                task_id=input.task_id, agent=self.name, success=False,
+                error="event_id is required to delete an event",
+            )
+        result = await cal.execute(action="delete_event", event_id=event_id)
+        if result.success:
+            await self._event_bus.publish(Event(
+                type=EventType.CALENDAR_EVENT_DELETED,
+                payload=result.data,
+                source=self.name,
+                workflow_id=input.workflow_id,
+            ))
+        return AgentOutput(
+            task_id=input.task_id, agent=self.name, success=result.success,
+            result=result.data, error=result.error,
+            events_emitted=[EventType.CALENDAR_EVENT_DELETED] if result.success else [],
         )
 
     async def _meeting_prep(self, input: AgentInput) -> AgentOutput:

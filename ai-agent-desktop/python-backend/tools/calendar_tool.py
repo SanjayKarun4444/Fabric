@@ -20,12 +20,13 @@ class CalendarTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Google Calendar API — list events, create events, detect conflicts"
+        return "Google Calendar API — list events, create events, delete events, detect conflicts"
 
     async def execute(self, action: str, **kwargs) -> ToolResult:
         handlers = {
             "list_events": self._list_events,
             "create_event": self._create_event,
+            "delete_event": self._delete_event,
             "get_next_event": self._get_next_event,
         }
         handler = handlers.get(action)
@@ -112,6 +113,13 @@ class CalendarTool(BaseTool):
             "event_id": created.get("id"),
             "htmlLink": created.get("htmlLink", ""),
         })
+
+    async def _delete_event(self, event_id: str, **_) -> ToolResult:
+        service = self._get_service()
+        if service is None:
+            return ToolResult(success=False, error="Google Calendar not connected")
+        service.events().delete(calendarId="primary", eventId=event_id).execute()
+        return ToolResult(success=True, data={"deleted_event_id": event_id})
 
     def _parse_event(self, item: dict, idx: int) -> dict:
         start_raw = item.get("start", {})

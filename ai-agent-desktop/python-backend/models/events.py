@@ -13,6 +13,7 @@ class EventType(str, Enum):
     # Calendar
     MEETING_SCHEDULED = "meeting.scheduled"
     MEETING_REMINDER = "meeting.reminder"
+    CALENDAR_EVENT_DELETED = "calendar.event_deleted"
     CONFLICT_DETECTED = "calendar.conflict_detected"
     # Tasks
     TASK_CREATED = "task.created"
