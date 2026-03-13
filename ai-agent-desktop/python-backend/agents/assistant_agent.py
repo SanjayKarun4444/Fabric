@@ -15,6 +15,9 @@ class AssistantAgent(BaseAgent):
     def __init__(self, tool_registry, memory, event_bus, orchestrator):
         super().__init__(tool_registry, memory, event_bus)
         self._orchestrator = orchestrator
+        # Stores a pending destructive action waiting for user confirmation.
+        # Shape: {"action": str, "params": dict, "summary": str}
+        self._pending_action: dict | None = None
 
     @property
     def name(self) -> str:
@@ -48,6 +51,26 @@ class AssistantAgent(BaseAgent):
         """
         claude = self.get_tool("claude")
         message = input.parameters.get("message", input.intent)
+        from datetime import date as _date
+        today_str = _date.today().isoformat()
+
+        # Step 0: handle confirmation / cancellation for a pending destructive action
+        if self._pending_action:
+            normalised = message.strip().lower()
+            confirmed = normalised in {"yes", "y", "confirm", "proceed", "do it", "go ahead", "ok", "okay", "sure", "yep", "yup"}
+            cancelled = normalised in {"no", "n", "cancel", "stop", "abort", "nope", "nah", "don't", "dont"}
+            if confirmed:
+                pending = self._pending_action
+                self._pending_action = None
+                return await self._execute_confirmed_action(pending, input)
+            elif cancelled:
+                self._pending_action = None
+                return AgentOutput(
+                    task_id=input.task_id, agent=self.name, success=True,
+                    result={"response": "Cancelled. No changes were made.", "message": message},
+                )
+            # Not a clear yes/no — clear the pending action and fall through to normal routing
+            self._pending_action = None
 
         # Step 1: classify intent
         parse_result = await claude.execute(
@@ -55,20 +78,32 @@ class AssistantAgent(BaseAgent):
                 "You are an intent router for a personal AI chief of staff. "
                 "Classify the user request and return ONLY a valid JSON object — no markdown, no explanation:\n"
                 "{\n"
-                '  "action": "answer" | "draft_email" | "workflow" | "search" | "create_task" | "calendar",\n'
+                '  "action": "answer" | "draft_email" | "workflow" | "search" | "create_task" | "create_event" | "delete_event" | "calendar",\n'
                 '  "workflow": null | "morning_routine" | "handle_inbox" | "daily_summary" | "prepare_for_tomorrow",\n'
                 '  "to": null | "recipient name or email",\n'
                 '  "subject": null | "email subject",\n'
                 '  "body": null | "email body text",\n'
                 '  "query": null | "search query or task title",\n'
+                '  "event_title": null | "calendar event title",\n'
+                '  "event_date": null | "YYYY-MM-DD date of the event",\n'
+                '  "event_start_time": null | "HH:MM 24h start time",\n'
+                '  "event_end_time": null | "HH:MM 24h end time",\n'
+                '  "event_description": null | "event description or notes",\n'
+                '  "event_keywords": null | "keywords to identify the event to delete",\n'
                 '  "direct_answer": null | "short direct answer when action is answer"\n'
                 "}\n"
+                f"Today's date is {today_str}. Resolve relative dates like 'tomorrow', 'next Monday' to YYYY-MM-DD.\n"
                 "Examples:\n"
                 "- 'Email john@company.com about the meeting tomorrow' → {\"action\":\"draft_email\",\"to\":\"john@company.com\",\"subject\":\"Meeting tomorrow\",\"body\":\"...\", ...}\n"
-            "- 'Email John about the meeting' → {\"action\":\"draft_email\",\"to\":\"John\",\"subject\":\"Meeting\",\"body\":\"...\", ...} (use the name if no email given — the app will ask for it)\n"
+                "- 'Email John about the meeting' → {\"action\":\"draft_email\",\"to\":\"John\",\"subject\":\"Meeting\",\"body\":\"...\", ...} (use the name if no email given — the app will ask for it)\n"
                 "- 'Prepare me for tomorrow' → {\"action\":\"workflow\",\"workflow\":\"prepare_for_tomorrow\", ...}\n"
                 "- 'Search for Python async tips' → {\"action\":\"search\",\"query\":\"Python async tips\", ...}\n"
                 "- 'Add a task to review the Q1 report' → {\"action\":\"create_task\",\"query\":\"Review Q1 report\", ...}\n"
+                "- 'Schedule a team sync tomorrow at 2pm to 3pm' → {\"action\":\"create_event\",\"event_title\":\"Team Sync\",\"event_date\":\"YYYY-MM-DD\",\"event_start_time\":\"14:00\",\"event_end_time\":\"15:00\", ...}\n"
+                "- 'Add dentist appointment on March 20 at 10am' → {\"action\":\"create_event\",\"event_title\":\"Dentist Appointment\",\"event_date\":\"YYYY-03-20\",\"event_start_time\":\"10:00\", ...}\n"
+                "- 'Delete the standup meeting tomorrow' → {\"action\":\"delete_event\",\"event_keywords\":\"standup\",\"event_date\":\"YYYY-MM-DD\", ...}\n"
+                "- 'Remove my 2pm call on Friday' → {\"action\":\"delete_event\",\"event_keywords\":\"2pm call\",\"event_date\":\"YYYY-MM-DD\", ...}\n"
+                "- 'What meetings do I have today?' → {\"action\":\"calendar\", ...}\n"
                 "- 'What is the capital of France?' → {\"action\":\"answer\",\"direct_answer\":\"Paris.\", ...}"
             ),
             prompt=message,
@@ -154,6 +189,81 @@ class AssistantAgent(BaseAgent):
             )
             response_text = f"Creating task: '{title}'. Task Agent has it."
 
+        elif action == "create_event":
+            d = parse_result.data
+            title = d.get("event_title") or "New Event"
+            event_date = d.get("event_date") or today_str
+            start_time = d.get("event_start_time")
+            end_time = d.get("event_end_time")
+            description = d.get("event_description") or ""
+            await self._orchestrator.dispatch(
+                intent="create_event",
+                parameters={
+                    "title": title,
+                    "date": event_date,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "description": description,
+                },
+                agent_name="calendar_agent",
+                workflow_id=input.workflow_id,
+            )
+            time_str = f" at {start_time}" if start_time else ""
+            response_text = f"Adding '{title}' to your calendar on {event_date}{time_str}. Calendar Agent is on it."
+
+        elif action == "delete_event":
+            d = parse_result.data
+            keywords = (d.get("event_keywords") or "").lower().strip()
+            event_date = d.get("event_date") or today_str
+
+            # Fetch events for the given date and find matches
+            cal = self.get_tool("calendar")
+            list_result = await cal.execute(action="list_events", date=event_date)
+            events = list_result.data or [] if list_result.success else []
+
+            # Filter by keyword match against title
+            if keywords:
+                kw_words = keywords.split()
+                matches = [
+                    e for e in events
+                    if any(w in e.get("title", "").lower() for w in kw_words)
+                ]
+            else:
+                matches = events
+
+            if not matches:
+                response_text = (
+                    f"I couldn't find any event matching '{keywords or 'your request'}' on {event_date}. "
+                    "Could you be more specific about the event name or date?"
+                )
+            elif len(matches) == 1:
+                evt = matches[0]
+                time_info = f" at {evt['time']}" if evt.get("time") and evt["time"] != "All day" else " (all day)"
+                duration = f" ({evt['duration']})" if evt.get("duration") and evt["duration"] != "All day" else ""
+                location = f"\nLocation: {evt['location']}" if evt.get("location") else ""
+                self._pending_action = {
+                    "action": "delete_event",
+                    "params": {"event_id": evt["id"], "event_title": evt["title"]},
+                    "summary": f"Delete **'{evt['title']}'** on {event_date}{time_info}{duration}",
+                }
+                response_text = (
+                    f"I found this event on your calendar:\n\n"
+                    f"**{evt['title']}** — {event_date}{time_info}{duration}{location}\n\n"
+                    f"Here's what I'll do:\n"
+                    f"• Delete **'{evt['title']}'** from your calendar permanently\n\n"
+                    f"Reply **yes** to confirm, or **no** to cancel."
+                )
+            else:
+                # Multiple matches — list them and ask to be more specific
+                lines = "\n".join(
+                    f"• **{e['title']}** at {e.get('time', 'All day')}" for e in matches[:5]
+                )
+                response_text = (
+                    f"I found {len(matches)} events on {event_date} matching '{keywords}':\n\n"
+                    f"{lines}\n\n"
+                    "Could you be more specific about which one to delete?"
+                )
+
         elif action == "calendar":
             await self._orchestrator.dispatch(
                 intent="get_today_meetings",
@@ -177,6 +287,28 @@ class AssistantAgent(BaseAgent):
         return AgentOutput(
             task_id=input.task_id, agent=self.name, success=True,
             result={"response": response_text, "message": message},
+        )
+
+    async def _execute_confirmed_action(self, pending: dict, input: AgentInput) -> AgentOutput:
+        """Execute a previously staged destructive action after user confirmation."""
+        action = pending["action"]
+        params = pending["params"]
+        summary = pending.get("summary", action)
+
+        if action == "delete_event":
+            await self._orchestrator.dispatch(
+                intent="delete_event",
+                parameters=params,
+                agent_name="calendar_agent",
+                workflow_id=input.workflow_id,
+            )
+            response_text = f"Done — **'{params['event_title']}'** has been deleted from your calendar."
+        else:
+            response_text = f"Action '{action}' confirmed but no executor found."
+
+        return AgentOutput(
+            task_id=input.task_id, agent=self.name, success=True,
+            result={"response": response_text, "message": input.parameters.get("message", "")},
         )
 
     async def _compile_briefing(self, input: AgentInput) -> AgentOutput:
