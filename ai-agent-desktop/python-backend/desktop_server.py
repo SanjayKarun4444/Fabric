@@ -334,6 +334,37 @@ async def _handle_legacy_command(command: str, args: Dict[str, Any]) -> Dict[str
         return {"success": True, "result": {"task_id": task_id, "status": "processing",
                 "response": "I'm on it — check back in a moment."}}
 
+    if command == "list_drafts":
+        gmail = GmailTool(_get_gmail_service)
+        r = await gmail.execute(action="list_drafts", max_results=args.get("max_results", 20))
+        return {"success": r.success, "result": {"drafts": r.data or []}, "error": r.error}
+
+    if command == "get_draft":
+        gmail = GmailTool(_get_gmail_service)
+        r = await gmail.execute(action="get_draft", draft_id=args.get("draft_id", ""))
+        return {"success": r.success, "result": r.data, "error": r.error}
+
+    if command == "update_draft":
+        gmail = GmailTool(_get_gmail_service)
+        r = await gmail.execute(
+            action="update_draft",
+            draft_id=args.get("draft_id", ""),
+            to=args.get("to", ""),
+            subject=args.get("subject", ""),
+            body=args.get("body", ""),
+        )
+        return {"success": r.success, "result": r.data, "error": r.error}
+
+    if command == "send_draft":
+        gmail = GmailTool(_get_gmail_service)
+        r = await gmail.execute(action="send_draft", draft_id=args.get("draft_id", ""))
+        return {"success": r.success, "result": r.data, "error": r.error}
+
+    if command == "delete_draft":
+        gmail = GmailTool(_get_gmail_service)
+        r = await gmail.execute(action="delete_draft", draft_id=args.get("draft_id", ""))
+        return {"success": r.success, "result": r.data, "error": r.error}
+
     if command == "check_new_emails":
         gmail = GmailTool(_get_gmail_service)
         r = await gmail.execute(action="get_counts")

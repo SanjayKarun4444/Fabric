@@ -27,6 +27,11 @@ class GmailTool(BaseTool):
             "search": self._search,
             "get_counts": self._get_counts,
             "create_draft": self._create_draft,
+            "list_drafts": self._list_drafts,
+            "get_draft": self._get_draft,
+            "update_draft": self._update_draft,
+            "send_draft": self._send_draft,
+            "delete_draft": self._delete_draft,
         }
         handler = handlers.get(action)
         if not handler:
@@ -132,6 +137,94 @@ class GmailTool(BaseTool):
                     error="Missing gmail.compose scope — run get_refresh_token.py to re-authenticate, then update GOOGLE_REFRESH_TOKEN in .env",
                 )
             raise
+
+    async def _list_drafts(self, max_results: int = 20, **_) -> ToolResult:
+        service = self._get_service()
+        if service is None:
+            return ToolResult(success=False, error="Gmail not connected")
+        result = service.users().drafts().list(userId="me", maxResults=max_results).execute()
+        drafts = []
+        for d in result.get("drafts", []):
+            full = service.users().drafts().get(
+                userId="me", id=d["id"], format="metadata"
+            ).execute()
+            msg = full.get("message", {})
+            headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
+            drafts.append({
+                "id": d["id"],
+                "to": headers.get("to", ""),
+                "subject": headers.get("subject", "(no subject)"),
+                "snippet": msg.get("snippet", ""),
+            })
+        return ToolResult(success=True, data=drafts)
+
+    async def _get_draft(self, draft_id: str, **_) -> ToolResult:
+        service = self._get_service()
+        if service is None:
+            return ToolResult(success=False, error="Gmail not connected")
+        full = service.users().drafts().get(userId="me", id=draft_id, format="full").execute()
+        msg = full.get("message", {})
+        payload = msg.get("payload", {})
+        headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
+        body = self._decode_body(payload)
+        return ToolResult(success=True, data={
+            "id": draft_id,
+            "to": headers.get("to", ""),
+            "subject": headers.get("subject", ""),
+            "body": body,
+        })
+
+    async def _update_draft(self, draft_id: str, to: str = "", subject: str = "", body: str = "", **_) -> ToolResult:
+        service = self._get_service()
+        if service is None:
+            return ToolResult(success=False, error="Gmail not connected")
+        import base64
+        from email.mime.text import MIMEText
+        mime = MIMEText(body)
+        mime["to"] = to
+        mime["subject"] = subject
+        raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
+        service.users().drafts().update(
+            userId="me", id=draft_id,
+            body={"message": {"raw": raw}}
+        ).execute()
+        return ToolResult(success=True, data={"id": draft_id, "to": to, "subject": subject})
+
+    async def _send_draft(self, draft_id: str, **_) -> ToolResult:
+        service = self._get_service()
+        if service is None:
+            return ToolResult(success=False, error="Gmail not connected")
+        try:
+            sent = service.users().drafts().send(
+                userId="me", body={"id": draft_id}
+            ).execute()
+            return ToolResult(success=True, data={"message_id": sent.get("id")})
+        except Exception as e:
+            if "insufficientPermissions" in str(e) or "403" in str(e):
+                return ToolResult(success=False, error="Missing gmail.compose scope — re-authenticate via get_refresh_token.py")
+            raise
+
+    async def _delete_draft(self, draft_id: str, **_) -> ToolResult:
+        service = self._get_service()
+        if service is None:
+            return ToolResult(success=False, error="Gmail not connected")
+        service.users().drafts().delete(userId="me", id=draft_id).execute()
+        return ToolResult(success=True, data={"deleted": draft_id})
+
+    def _decode_body(self, payload: dict) -> str:
+        """Recursively extract plain text body from a Gmail message payload."""
+        import base64
+        mime_type = payload.get("mimeType", "")
+        if mime_type == "text/plain":
+            data = payload.get("body", {}).get("data", "")
+            if data:
+                return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+            return ""
+        for part in payload.get("parts", []):
+            result = self._decode_body(part)
+            if result:
+                return result
+        return ""
 
     def _humanize_date(self, date_str: str) -> str:
         try:
