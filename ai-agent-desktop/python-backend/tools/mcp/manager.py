@@ -111,18 +111,22 @@ class MCPManager:
 
     async def start(self) -> None:
         """Spawn and connect all four MCP servers. Called once at startup."""
+        import os
         server_modules = {
             "calendar": "tools.mcp.calendar_server",
             "gmail":    "tools.mcp.gmail_server",
             "search":   "tools.mcp.search_server",
             "tasks":    "tools.mcp.task_server",
         }
+        # Explicitly snapshot the current env so subprocesses receive all vars
+        # that load_dotenv() placed into os.environ (e.g. Google credentials).
+        current_env = {k: v for k, v in os.environ.items()}
         for name, module in server_modules.items():
             conn = _ServerConn(name=name)
             params = StdioServerParameters(
-                command=sys.executable,        # venv Python that's running this app
+                command=sys.executable,   # venv Python that's running this app
                 args=["-m", module],
-                env=None,                      # inherit full environment (incl. .env vars)
+                env=current_env,
                 cwd=self._backend_dir,
             )
             try:
