@@ -14,6 +14,7 @@ from datetime import datetime
 import mcp.types as types
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
+from mcp.server.lowlevel.server import NotificationOptions
 from mcp.server.stdio import stdio_server
 
 server = Server("fabric-tasks")
@@ -213,7 +214,7 @@ async def main():
                 server_name="fabric-tasks",
                 server_version="1.0.0",
                 capabilities=server.get_capabilities(
-                    notification_options=None,
+                    notification_options=NotificationOptions(),
                     experimental_capabilities={},
                 ),
             ),

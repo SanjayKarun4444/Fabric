@@ -15,6 +15,7 @@ from email.mime.text import MIMEText
 import mcp.types as types
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
+from mcp.server.lowlevel.server import NotificationOptions
 from mcp.server.stdio import stdio_server
 
 server = Server("fabric-gmail")
@@ -275,7 +276,7 @@ async def main():
                 server_name="fabric-gmail",
                 server_version="1.0.0",
                 capabilities=server.get_capabilities(
-                    notification_options=None,
+                    notification_options=NotificationOptions(),
                     experimental_capabilities={},
                 ),
             ),
