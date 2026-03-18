@@ -94,7 +94,10 @@ class AssistantAgent(BaseAgent):
         """
         claude = self.get_tool("claude")
         message = input.parameters.get("message", input.intent)
-        today_str = _date.today().isoformat()
+        from datetime import datetime as _dt
+        now_dt = _dt.now()
+        today_str = now_dt.date().isoformat()
+        current_time_str = now_dt.strftime("%H:%M")
 
         # ── Step 0: confirmation / cancellation for a pending destructive action ──
         if self._pending_action:
@@ -132,21 +135,25 @@ class AssistantAgent(BaseAgent):
                 "You are an intent router for a personal AI chief of staff. "
                 "Classify the user request and return ONLY a valid JSON object — no markdown, no explanation:\n"
                 "{\n"
-                '  "action": "answer" | "draft_email" | "workflow" | "search" | "create_task" | "create_event" | "delete_event" | "calendar",\n'
+                '  "action": "answer" | "draft_email" | "workflow" | "search" | "create_task" | "create_event" | "delete_event" | "move_event" | "calendar",\n'
                 '  "workflow": null | "morning_routine" | "handle_inbox" | "daily_summary" | "prepare_for_tomorrow",\n'
                 '  "to": null | "recipient name or email",\n'
                 '  "subject": null | "email subject",\n'
                 '  "body": null | "email body text",\n'
                 '  "query": null | "search query or task title",\n'
                 '  "event_title": null | "calendar event title",\n'
-                '  "event_date": null | "YYYY-MM-DD date of the event",\n'
-                '  "event_start_time": null | "HH:MM 24h start time",\n'
-                '  "event_end_time": null | "HH:MM 24h end time",\n'
+                '  "event_date": null | "YYYY-MM-DD current date of the event to find",\n'
+                '  "event_end_date": null | "YYYY-MM-DD end date (only if different from start date)",\n'
+                '  "event_start_time": null | "HH:MM 24h start time — resolve \'now\' to the actual current time",\n'
+                '  "event_end_time": null | "HH:MM 24h end time — resolve \'now\' to the actual current time",\n'
                 '  "event_description": null | "event description or notes",\n'
-                '  "event_keywords": null | "keywords to identify the event to delete",\n'
+                '  "event_keywords": null | "keywords to identify the event to delete or move",\n'
+                '  "new_date": null | "YYYY-MM-DD new date when moving an event",\n'
+                '  "new_start_time": null | "HH:MM 24h new start time when moving or rescheduling",\n'
+                '  "new_end_time": null | "HH:MM 24h new end time when moving or rescheduling",\n'
                 '  "direct_answer": null | "short direct answer when action is answer"\n'
                 "}\n"
-                f"Today's date is {today_str}. Resolve relative dates like 'tomorrow', 'next Monday' to YYYY-MM-DD.\n"
+                f"Today's date is {today_str}. Current time is {current_time_str}. Resolve relative dates like 'tomorrow', 'next Monday' to YYYY-MM-DD. Resolve 'now' to the current time {current_time_str}.\n"
                 "Use the conversation history below to resolve references like 'it', 'that', 'the same one', etc.\n"
                 "Examples:\n"
                 "- 'Email john@company.com about the meeting tomorrow' → {\"action\":\"draft_email\",\"to\":\"john@company.com\",\"subject\":\"Meeting tomorrow\",\"body\":\"...\", ...}\n"
@@ -157,6 +164,9 @@ class AssistantAgent(BaseAgent):
                 "- 'Schedule a team sync tomorrow at 2pm to 3pm' → {\"action\":\"create_event\",\"event_title\":\"Team Sync\",\"event_date\":\"YYYY-MM-DD\",\"event_start_time\":\"14:00\",\"event_end_time\":\"15:00\", ...}\n"
                 "- 'Delete the standup meeting tomorrow' → {\"action\":\"delete_event\",\"event_keywords\":\"standup\",\"event_date\":\"YYYY-MM-DD\", ...}\n"
                 "- 'Remove my 2pm call on Friday' → {\"action\":\"delete_event\",\"event_keywords\":\"2pm call\",\"event_date\":\"YYYY-MM-DD\", ...}\n"
+                "- 'Move my pickleball to Friday' → {\"action\":\"move_event\",\"event_keywords\":\"pickleball\",\"event_date\":\"YYYY-MM-DD (current date)\",\"new_date\":\"YYYY-MM-DD (friday)\", ...}\n"
+                "- 'Reschedule my 3pm meeting to tomorrow at 4pm' → {\"action\":\"move_event\",\"event_keywords\":\"3pm meeting\",\"event_date\":\"YYYY-MM-DD\",\"new_date\":\"YYYY-MM-DD\",\"new_start_time\":\"16:00\", ...}\n"
+                "- 'Remove it and move it to Friday 4-6pm' → {\"action\":\"move_event\",\"event_keywords\":\"<from context>\",\"event_date\":\"<from context>\",\"new_date\":\"YYYY-MM-DD (friday)\",\"new_start_time\":\"16:00\",\"new_end_time\":\"18:00\", ...}\n"
                 "- 'What meetings do I have today?' → {\"action\":\"calendar\", ...}\n"
                 "- 'What is the capital of France?' → {\"action\":\"answer\",\"direct_answer\":\"Paris.\", ...}"
                 + context_suffix
@@ -257,6 +267,7 @@ class AssistantAgent(BaseAgent):
             d = parse_result.data
             title = d.get("event_title") or "New Event"
             event_date = d.get("event_date") or today_str
+            end_date = d.get("event_end_date") or event_date
             start_time = d.get("event_start_time")
             end_time = d.get("event_end_time")
             description = d.get("event_description") or ""
@@ -265,6 +276,7 @@ class AssistantAgent(BaseAgent):
                 parameters={
                     "title": title,
                     "date": event_date,
+                    "end_date": end_date,
                     "start_time": start_time,
                     "end_time": end_time,
                     "description": description,
@@ -272,9 +284,16 @@ class AssistantAgent(BaseAgent):
                 agent_name="calendar_agent",
                 workflow_id=input.workflow_id,
             )
-            time_str = f" at {start_time}" if start_time else ""
+            if start_time and end_time:
+                span = f" from {start_time} to {end_time}"
+                if end_date != event_date:
+                    span += f" ({event_date} → {end_date})"
+            elif start_time:
+                span = f" at {start_time}"
+            else:
+                span = ""
             response_text = (
-                f"Adding '{title}' to your calendar on {event_date}{time_str}. "
+                f"Adding '{title}' to your calendar{span}. "
                 "Calendar Agent is on it."
             )
 
@@ -336,6 +355,68 @@ class AssistantAgent(BaseAgent):
                     "Could you be more specific about which one to delete?"
                 )
 
+        elif action == "move_event":
+            d = parse_result.data
+            keywords = (d.get("event_keywords") or "").lower().strip()
+            event_date = d.get("event_date") or today_str
+            new_date = d.get("new_date") or today_str
+            new_start_time = d.get("new_start_time")
+            new_end_time = d.get("new_end_time")
+
+            cal = self.get_tool("calendar")
+            list_result = await cal.execute(action="list_events", date=event_date)
+            events = list_result.data or [] if list_result.success else []
+
+            if keywords:
+                kw_words = keywords.split()
+                matches = [
+                    e for e in events
+                    if any(w in e.get("title", "").lower() for w in kw_words)
+                ]
+            else:
+                matches = events
+
+            if not matches:
+                response_text = (
+                    f"I couldn't find any event matching '{keywords or 'your request'}' on {event_date}. "
+                    "Could you be more specific about the event name or date?"
+                )
+            elif len(matches) == 1:
+                evt = matches[0]
+                old_time = evt.get("time", "All day")
+                new_time_str = f"{new_start_time}–{new_end_time}" if new_start_time and new_end_time else (new_start_time or "same time")
+                self._pending_action = {
+                    "action": "move_event",
+                    "params": {
+                        "event_id": evt["id"],
+                        "event_title": evt["title"],
+                        "old_date": event_date,
+                        "new_date": new_date,
+                        "new_start_time": new_start_time or evt.get("_start_time"),
+                        "new_end_time": new_end_time or evt.get("_end_time"),
+                        "description": evt.get("description", ""),
+                    },
+                    "summary": f"Move **'{evt['title']}'** from {event_date} {old_time} → {new_date} {new_time_str}",
+                }
+                location = f"\nLocation: {evt['location']}" if evt.get("location") else ""
+                response_text = (
+                    f"I found this event on your calendar:\n\n"
+                    f"**{evt['title']}** — {event_date} at {old_time}{location}\n\n"
+                    f"Here's what I'll do:\n"
+                    f"• Delete the existing event on **{event_date}**\n"
+                    f"• Recreate it on **{new_date}** at **{new_time_str}**\n\n"
+                    f"Reply **yes** to confirm, or **no** to cancel."
+                )
+            else:
+                lines = "\n".join(
+                    f"• **{e['title']}** at {e.get('time', 'All day')}" for e in matches[:5]
+                )
+                response_text = (
+                    f"I found {len(matches)} events on {event_date} matching '{keywords}':\n\n"
+                    f"{lines}\n\n"
+                    "Could you be more specific about which one to move?"
+                )
+
         elif action == "calendar":
             await self._orchestrator.dispatch(
                 intent="get_today_meetings",
@@ -383,6 +464,39 @@ class AssistantAgent(BaseAgent):
                 workflow_id=input.workflow_id,
             )
             response_text = f"Done — **'{params['event_title']}'** has been deleted from your calendar."
+
+        elif action == "move_event":
+            # Step 1: delete the old event
+            await self._orchestrator.dispatch(
+                intent="delete_event",
+                parameters={"event_id": params["event_id"], "event_title": params["event_title"]},
+                agent_name="calendar_agent",
+                workflow_id=input.workflow_id,
+            )
+            # Step 2: create the event on the new date
+            await self._orchestrator.dispatch(
+                intent="create_event",
+                parameters={
+                    "title": params["event_title"],
+                    "date": params["new_date"],
+                    "end_date": params["new_date"],
+                    "start_time": params.get("new_start_time"),
+                    "end_time": params.get("new_end_time"),
+                    "description": params.get("description", ""),
+                },
+                agent_name="calendar_agent",
+                workflow_id=input.workflow_id,
+            )
+            new_time_str = (
+                f"{params['new_start_time']}–{params['new_end_time']}"
+                if params.get("new_start_time") and params.get("new_end_time")
+                else params.get("new_start_time") or "same time"
+            )
+            response_text = (
+                f"Done — **'{params['event_title']}'** has been moved to "
+                f"**{params['new_date']}** at **{new_time_str}**."
+            )
+
         else:
             response_text = f"Action '{action}' confirmed but no executor found."
 

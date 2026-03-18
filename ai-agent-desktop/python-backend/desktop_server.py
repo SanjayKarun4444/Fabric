@@ -27,6 +27,7 @@ from tools.gmail_tool import GmailTool
 from tools.calendar_tool import CalendarTool
 from tools.search_tool import SearchTool
 from tools.task_db_tool import TaskDBTool
+from tools.mcp.manager import MCPManager
 
 from agents.email_agent import EmailAgent
 from agents.calendar_agent import CalendarAgent
@@ -114,13 +115,14 @@ _orchestrator: Optional[AgentOrchestrator] = None
 _registry: Optional[AgentRegistry] = None
 _scheduler: Optional[Scheduler] = None
 _tools: Optional[ToolRegistry] = None
+_mcp: Optional[MCPManager] = None
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _event_bus, _orchestrator, _registry, _scheduler, _tools
+    global _event_bus, _orchestrator, _registry, _scheduler, _tools, _mcp
 
     _logger.info("Starting Fabric AI backend...")
 
@@ -134,8 +136,22 @@ async def lifespan(app: FastAPI):
         chroma_path=settings.chroma_path,
     )
 
+    # ── MCP servers ─────────────────────────────────────────────────────────
+    import os as _os
+    _backend_dir = _os.path.dirname(_os.path.abspath(__file__))
+    _mcp = MCPManager(backend_dir=_backend_dir)
+    try:
+        await _mcp.start()
+        _logger.info(f"MCP servers online: {_mcp.connected_servers}")
+    except Exception as e:
+        _logger.warning(f"MCP startup error (continuing without MCP): {e}")
+        _mcp = None
+
     _tools = ToolRegistry()
-    _tools.register(ClaudeTool())
+    claude_tool = ClaudeTool()
+    if _mcp:
+        claude_tool.mcp = _mcp          # attach MCP manager so execute_with_tools works
+    _tools.register(claude_tool)
     _tools.register(GmailTool(_get_gmail_service))
     _tools.register(CalendarTool(_get_calendar_service))
     _tools.register(SearchTool())
@@ -179,6 +195,8 @@ async def lifespan(app: FastAPI):
     await _scheduler.stop()
     await _orchestrator.stop()
     await _event_bus.stop()
+    if _mcp:
+        await _mcp.stop()
 
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────

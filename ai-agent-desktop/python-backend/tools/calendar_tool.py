@@ -84,28 +84,30 @@ class CalendarTool(BaseTool):
             return ToolResult(success=True, data=self._parse_event(items[0], 0))
         return ToolResult(success=True, data=None)
 
-    async def _create_event(self, title: str, date: str, start_time: str = None,
-                            end_time: str = None, description: str = "", **_) -> ToolResult:
+    async def _create_event(self, title: str, date: str, end_date: str = None,
+                            start_time: str = None, end_time: str = None,
+                            description: str = "", **_) -> ToolResult:
         service = self._get_service()
         if service is None:
             return ToolResult(success=False, error="Google Calendar not connected")
 
         tz_offset = datetime.now().astimezone().strftime('%z')
         tz_offset = f"{tz_offset[:3]}:{tz_offset[3:]}"
+        actual_end_date = end_date or date
 
         if start_time and end_time:
             body = {
                 "summary": title,
                 "description": description,
                 "start": {"dateTime": f"{date}T{start_time}:00{tz_offset}"},
-                "end": {"dateTime": f"{date}T{end_time}:00{tz_offset}"},
+                "end": {"dateTime": f"{actual_end_date}T{end_time}:00{tz_offset}"},
             }
         else:
             body = {
                 "summary": title,
                 "description": description,
                 "start": {"date": date},
-                "end": {"date": date},
+                "end": {"date": actual_end_date},
             }
 
         created = service.events().insert(calendarId="primary", body=body).execute()
