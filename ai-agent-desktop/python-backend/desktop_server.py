@@ -17,6 +17,7 @@ from core.task_queue import TaskQueue
 from core.registry import AgentRegistry
 from core.orchestrator import AgentOrchestrator
 from core.scheduler import Scheduler
+from core.graph import build_graph
 
 from memory.manager import MemoryManager
 from memory.conversation_memory import ConversationMemory
@@ -116,13 +117,14 @@ _registry: Optional[AgentRegistry] = None
 _scheduler: Optional[Scheduler] = None
 _tools: Optional[ToolRegistry] = None
 _mcp: Optional[MCPManager] = None
+_graph = None   # LangGraph conversation graph (Phase 2)
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _event_bus, _orchestrator, _registry, _scheduler, _tools, _mcp
+    global _event_bus, _orchestrator, _registry, _scheduler, _tools, _mcp, _graph
 
     _logger.info("Starting Fabric AI backend...")
 
@@ -165,7 +167,16 @@ async def lifespan(app: FastAPI):
     _registry.register(TaskAgent(_tools, memory, _event_bus))
     _registry.register(ResearchAgent(_tools, memory, _event_bus))
     _registry.register(FinanceAgent(_tools, memory, _event_bus))
-    _registry.register(AssistantAgent(_tools, memory, _event_bus, _orchestrator, conv_memory))
+    assistant_agent = AssistantAgent(_tools, memory, _event_bus, _orchestrator, conv_memory)
+    _registry.register(assistant_agent)
+
+    # ── LangGraph conversation graph (Phase 2) ───────────────────────────────
+    try:
+        _graph = build_graph(assistant_agent)
+        _logger.info("LangGraph conversation graph ready")
+    except Exception as e:
+        _logger.warning(f"LangGraph unavailable (pip install langgraph): {e}")
+        _graph = None
 
     _scheduler = Scheduler()
     from models.events import Event, EventType
@@ -188,6 +199,13 @@ async def lifespan(app: FastAPI):
     await _scheduler.start()
 
     _logger.info(f"Fabric AI backend ready — agents: {[a.name for a in _registry.all()]}")
+
+    # Register routers here (inside lifespan, before yield) so they are
+    # available before the first request hits.  Doing this in on_event("startup")
+    # is unreliable in modern FastAPI when lifespan is also defined.
+    app.include_router(make_agents_router(_orchestrator, _registry))
+    app.include_router(make_chat_router(_orchestrator, graph=_graph))
+    app.include_router(make_health_router(_registry, ws_manager))
 
     yield
 
@@ -215,13 +233,6 @@ app.add_middleware(
 @app.websocket("/ws")
 async def websocket_route(websocket: WebSocket):
     await ws_endpoint(websocket, _orchestrator, _event_bus, _registry)
-
-
-@app.on_event("startup")
-async def _attach_routes():
-    app.include_router(make_agents_router(_orchestrator, _registry))
-    app.include_router(make_chat_router(_orchestrator))
-    app.include_router(make_health_router(_registry, ws_manager))
 
 
 # ── Legacy /agent/execute (Electron IPC backward-compat) ──────────────────────

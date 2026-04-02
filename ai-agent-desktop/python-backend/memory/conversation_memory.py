@@ -202,31 +202,18 @@ class ConversationMemory:
         """
         Build a formatted context string to prepend to Claude's system prompt.
 
-        Combines:
-        - Recent turns from the current conversation (exact order, SQLite)
-        - Semantically similar turns from past sessions (ChromaDB RAG)
+        Only includes turns from the current conversation (SQLite).
+        Cross-session RAG is intentionally excluded so that each new
+        conversation starts completely fresh with no bleed from past chats.
 
         Returns an empty string when there is no history yet.
         """
         recent = await self.get_recent_turns(user_id, conversation_id, n=8)
-        similar = await self.search_similar(
-            user_id, current_message, n=3,
-            exclude_conversation_id=conversation_id,
-        )
+        if not recent:
+            return ""
 
-        parts: list[str] = []
-
-        if recent:
-            lines: list[str] = []
-            for turn in recent:
-                lines.append(f"User: {turn['user']}")
-                lines.append(f"Assistant: {turn['assistant']}")
-            parts.append("## Conversation so far\n" + "\n".join(lines))
-
-        if similar:
-            parts.append(
-                "## Relevant context from past sessions\n"
-                + "\n\n---\n\n".join(similar)
-            )
-
-        return "\n\n".join(parts)
+        lines: list[str] = []
+        for turn in recent:
+            lines.append(f"User: {turn['user']}")
+            lines.append(f"Assistant: {turn['assistant']}")
+        return "## Conversation so far\n" + "\n".join(lines)

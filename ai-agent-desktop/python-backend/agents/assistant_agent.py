@@ -38,6 +38,10 @@ class AssistantAgent(BaseAgent):
             "compile_daily_summary", "compile_morning_briefing",
         ]
 
+    async def execute_confirmed(self, input: AgentInput, pending: dict) -> AgentOutput:
+        """Called by the LangGraph graph after the user confirms a staged action."""
+        return await self._execute_confirmed_action(pending, input)
+
     async def execute(self, input: AgentInput) -> AgentOutput:
         dispatch = {
             "compile_briefing": self._compile_briefing,
@@ -94,13 +98,16 @@ class AssistantAgent(BaseAgent):
         """
         claude = self.get_tool("claude")
         message = input.parameters.get("message", input.intent)
+        # When called from the LangGraph graph the graph manages confirmation state.
+        from_graph = bool(input.parameters.get("_from_graph"))
         from datetime import datetime as _dt
         now_dt = _dt.now()
         today_str = now_dt.date().isoformat()
         current_time_str = now_dt.strftime("%H:%M")
 
         # ── Step 0: confirmation / cancellation for a pending destructive action ──
-        if self._pending_action:
+        # Skipped when from_graph=True — the LangGraph graph owns confirmation state.
+        if self._pending_action and not from_graph:
             normalised = message.strip().lower()
             confirmed = normalised in {
                 "yes", "y", "confirm", "proceed", "do it",
@@ -135,7 +142,7 @@ class AssistantAgent(BaseAgent):
                 "You are an intent router for a personal AI chief of staff. "
                 "Classify the user request and return ONLY a valid JSON object — no markdown, no explanation:\n"
                 "{\n"
-                '  "action": "answer" | "draft_email" | "workflow" | "search" | "create_task" | "create_event" | "delete_event" | "move_event" | "calendar",\n'
+                '  "action": "answer" | "draft_email" | "workflow" | "search" | "create_task" | "list_tasks" | "create_event" | "delete_event" | "move_event" | "calendar",\n'
                 '  "workflow": null | "morning_routine" | "handle_inbox" | "daily_summary" | "prepare_for_tomorrow",\n'
                 '  "to": null | "recipient name or email",\n'
                 '  "subject": null | "email subject",\n'
@@ -161,6 +168,9 @@ class AssistantAgent(BaseAgent):
                 "- 'Prepare me for tomorrow' → {\"action\":\"workflow\",\"workflow\":\"prepare_for_tomorrow\", ...}\n"
                 "- 'Search for Python async tips' → {\"action\":\"search\",\"query\":\"Python async tips\", ...}\n"
                 "- 'Add a task to review the Q1 report' → {\"action\":\"create_task\",\"query\":\"Review Q1 report\", ...}\n"
+                "- 'What tasks do I have today?' → {\"action\":\"list_tasks\", ...}\n"
+                "- 'Show me my pending tasks' → {\"action\":\"list_tasks\", ...}\n"
+                "- 'What are my priorities?' → {\"action\":\"list_tasks\", ...}\n"
                 "- 'Schedule a team sync tomorrow at 2pm to 3pm' → {\"action\":\"create_event\",\"event_title\":\"Team Sync\",\"event_date\":\"YYYY-MM-DD\",\"event_start_time\":\"14:00\",\"event_end_time\":\"15:00\", ...}\n"
                 "- 'Delete the standup meeting tomorrow' → {\"action\":\"delete_event\",\"event_keywords\":\"standup\",\"event_date\":\"YYYY-MM-DD\", ...}\n"
                 "- 'Remove my 2pm call on Friday' → {\"action\":\"delete_event\",\"event_keywords\":\"2pm call\",\"event_date\":\"YYYY-MM-DD\", ...}\n"
@@ -193,6 +203,10 @@ class AssistantAgent(BaseAgent):
 
         action = parse_result.data.get("action", "answer")
         response_text = ""
+        # Staged action that requires confirmation — populated by delete/move branches.
+        # When from_graph=True this is returned in the result (graph owns state);
+        # otherwise it goes into self._pending_action (legacy path).
+        _staged_action: dict | None = None
 
         # ── Step 3: execute the classified action ─────────────────────────────
 
@@ -242,16 +256,20 @@ class AssistantAgent(BaseAgent):
 
         elif action == "search":
             query = parse_result.data.get("query") or message
-            await self._orchestrator.dispatch(
-                intent="web_search",
-                parameters={"query": query},
-                agent_name="research_agent",
-                workflow_id=input.workflow_id,
-            )
-            response_text = (
-                f"Searching for '{query}'. Research Agent is on it — "
-                "results will appear in the event feed."
-            )
+            search_tool = self.get_tool("search")
+            r = await search_tool.execute(query=query)
+            if r.success and r.data:
+                summary = await claude.execute(
+                    system=(
+                        "You are a helpful research assistant. "
+                        "Summarise these web search results clearly and concisely in 3-5 bullet points. "
+                        "Focus on the most relevant facts."
+                    ),
+                    prompt=f"Query: {query}\n\nSearch results:\n{r.data}",
+                )
+                response_text = f"**Search: {query}**\n\n{summary.data or r.data}"
+            else:
+                response_text = f"I couldn't find results for '{query}'. Try rephrasing your query."
 
         elif action == "create_task":
             title = parse_result.data.get("query") or message
@@ -262,6 +280,29 @@ class AssistantAgent(BaseAgent):
                 workflow_id=input.workflow_id,
             )
             response_text = f"Creating task: '{title}'. Task Agent has it."
+
+        elif action == "list_tasks":
+            task_db = self.get_tool("task_db")
+            r = await task_db.execute(action="list", status="pending")
+            tasks = (r.data or []) if r.success else []
+            if not tasks:
+                response_text = "You have no pending tasks right now."
+            else:
+                priority_order = {"high": 0, "medium": 1, "low": 2}
+                tasks_sorted = sorted(tasks, key=lambda t: priority_order.get(t.get("priority", "medium"), 1))
+                lines = []
+                for t in tasks_sorted[:15]:
+                    pri = t.get("priority", "medium")
+                    pri_label = {"high": "HIGH", "medium": "med", "low": "low"}.get(pri, pri)
+                    due = f"  ·  due {t['due_date']}" if t.get("due_date") else ""
+                    lines.append(f"• **{t['title']}** [{pri_label}]{due}")
+                total = len(tasks)
+                shown = len(lines)
+                response_text = (
+                    f"You have **{total}** pending task{'s' if total != 1 else ''}:\n\n"
+                    + "\n".join(lines)
+                    + (f"\n\n_Showing {shown} of {total}_" if total > shown else "")
+                )
 
         elif action == "create_event":
             d = parse_result.data
@@ -333,11 +374,13 @@ class AssistantAgent(BaseAgent):
                     else ""
                 )
                 location = f"\nLocation: {evt['location']}" if evt.get("location") else ""
-                self._pending_action = {
+                _staged_action = {
                     "action": "delete_event",
                     "params": {"event_id": evt["id"], "event_title": evt["title"]},
                     "summary": f"Delete **'{evt['title']}'** on {event_date}{time_info}{duration}",
                 }
+                if not from_graph:
+                    self._pending_action = _staged_action
                 response_text = (
                     f"I found this event on your calendar:\n\n"
                     f"**{evt['title']}** — {event_date}{time_info}{duration}{location}\n\n"
@@ -385,7 +428,7 @@ class AssistantAgent(BaseAgent):
                 evt = matches[0]
                 old_time = evt.get("time", "All day")
                 new_time_str = f"{new_start_time}–{new_end_time}" if new_start_time and new_end_time else (new_start_time or "same time")
-                self._pending_action = {
+                _staged_action = {
                     "action": "move_event",
                     "params": {
                         "event_id": evt["id"],
@@ -398,6 +441,8 @@ class AssistantAgent(BaseAgent):
                     },
                     "summary": f"Move **'{evt['title']}'** from {event_date} {old_time} → {new_date} {new_time_str}",
                 }
+                if not from_graph:
+                    self._pending_action = _staged_action
                 location = f"\nLocation: {evt['location']}" if evt.get("location") else ""
                 response_text = (
                     f"I found this event on your calendar:\n\n"
@@ -418,13 +463,31 @@ class AssistantAgent(BaseAgent):
                 )
 
         elif action == "calendar":
-            await self._orchestrator.dispatch(
-                intent="get_today_meetings",
-                parameters={},
-                agent_name="calendar_agent",
-                workflow_id=input.workflow_id,
-            )
-            response_text = "Fetching your schedule. Calendar Agent is checking your meetings."
+            cal = self.get_tool("calendar")
+            # Respect a specific date if the classifier extracted one
+            target_date = parse_result.data.get("event_date") or today_str
+            r = await cal.execute(action="list_events", date=target_date)
+            events = (r.data or []) if r.success else []
+            date_label = "today" if target_date == today_str else target_date
+            if not events:
+                response_text = f"You have no meetings scheduled for {date_label}."
+            else:
+                lines = []
+                for e in events:
+                    time_str = e.get("time", "All day")
+                    duration = (
+                        f" ({e['duration']})"
+                        if e.get("duration") and e["duration"] not in ("All day", "")
+                        else ""
+                    )
+                    location = f"  ·  {e['location']}" if e.get("location") else ""
+                    lines.append(f"• **{e['title']}** — {time_str}{duration}{location}")
+                count = len(events)
+                response_text = (
+                    f"Here's your schedule for {date_label} "
+                    f"({count} meeting{'s' if count != 1 else ''}):\n\n"
+                    + "\n".join(lines)
+                )
 
         else:  # "answer"
             direct = parse_result.data.get("direct_answer")
@@ -444,9 +507,16 @@ class AssistantAgent(BaseAgent):
         # ── Step 4: persist this turn to memory ───────────────────────────────
         await self._save_turn(input, response_text, {"action": action})
 
+        result_data: dict = {"response": response_text, "message": message}
+        # Signal to the LangGraph graph that a confirmation is required.
+        # The graph will store pending_action in its checkpointed state.
+        if from_graph and _staged_action:
+            result_data["needs_confirmation"] = True
+            result_data["pending_action"] = _staged_action
+
         return AgentOutput(
             task_id=input.task_id, agent=self.name, success=True,
-            result={"response": response_text, "message": message},
+            result=result_data,
         )
 
     async def _execute_confirmed_action(
